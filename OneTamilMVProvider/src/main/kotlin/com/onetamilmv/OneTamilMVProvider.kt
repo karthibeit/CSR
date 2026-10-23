@@ -9,6 +9,9 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URI
@@ -18,8 +21,8 @@ import java.net.URLEncoder
  * OneTamilMV — CloudStream provider for the 1TamilMV forum.
  *
  * How the site actually works (checked 2026-10-23):
- *  - 1TamilMV is a XenForo forum, not a streaming site. Every release is a
- *    forum thread, and the first post of the thread holds the links.
+ *  - 1TamilMV is an Invision Community forum, not a streaming site.
+ *    Every release is a forum topic, and the first post holds the links.
  *  - Those links are mostly magnet / .torrent links, plus some direct and
  *    file-host download links grouped by quality (360p / 480p / 720p /
  *    1080p / 2160p). There are no embedded streaming players to scrape.
@@ -121,7 +124,7 @@ class OneTamilMVProvider : MainAPI() {
     }
 
     // ------------------------------------------------------------------
-    // Listing / search parsing (XenForo thread lists)
+    // Listing / search parsing (Invision topic lists)
     // ------------------------------------------------------------------
 
     private fun cleanThreadTitle(raw: String): String {
@@ -181,9 +184,11 @@ class OneTamilMVProvider : MainAPI() {
 
     private val topicUrlRegex = Regex("/forums/topic/\\d+[-/]|/threads/[^/]*\\.?\\d+")
 
-    private fun Document.extractThreads(): List<SearchResponse> {
+    private data class ThreadItem(val title: String, val href: String)
+
+    private fun Document.extractThreads(): List<ThreadItem> {
         val seen = mutableSetOf<String>()
-        val results = mutableListOf<SearchResponse>()
+        val results = mutableListOf<ThreadItem>()
 
         // Generic pass over every topic anchor (Invision /forums/topic/ and
         // legacy XenForo /threads/ links both work with this).
@@ -201,19 +206,79 @@ class OneTamilMVProvider : MainAPI() {
                     "trending", "latest posts", "popular topics"
                 )
             ) return@forEach
-            // Poster thumbs ride along in forum listings when present.
-            val poster = a.parents().take(4)
-                .flatMap { it.select("img") }
-                .firstOrNull { img ->
-                    val src = img.absUrl("src").ifBlank { img.attr("src") }
-                    src.isNotBlank() && !src.contains("avatar") &&
-                        !src.contains("logo") && !src.contains("emoji")
-                }?.let { fixUrlNull(it.absUrl("src").ifBlank { it.attr("src") }) }
-            results.add(newMovieSearchResponse(title, href, TvType.Movie) {
-                this.posterUrl = poster
-            })
+            results.add(ThreadItem(title, href))
         }
         return results
+    }
+
+    // ------------------------------------------------------------------
+    // Posters
+    //
+    // Listing pages (home / forums / search) carry NO poster images at
+    // all — checked live 2026-10-23, they only have the site logo and
+    // member avatars. The one poster lives inside each topic's first
+    // post: it is the first content image (hosted on pixelbb, Twitter
+    // image CDN, …), followed by vlcsnap screenshots and decoration
+    // (torrborder / uTorrent). So home/search cards fetch the first
+    // ~24 topic pages in parallel and borrow each topic's poster.
+    // ------------------------------------------------------------------
+
+    private fun Document.firstPost(): Element =
+        this.selectFirst("div.cPost_contentWrap")
+            ?: this.selectFirst("[data-role=commentContent]")
+            ?: this.selectFirst("div.ipsType_richText")
+            ?: this.body()
+
+    /** First real poster image inside a post; null when none is usable. */
+    private fun Element.posterFromPost(): String? {
+        val skip = listOf(
+            "logo", "avatar", "torrborder", "utorrent", "smilie", "emoji",
+            "vlcsnap", "snapshot", "screenshot"
+        )
+        for (img in this.select("img")) {
+            val src = img.absUrl("src")
+                .ifBlank { img.attr("data-src") }
+                .ifBlank { img.attr("src") }
+            if (src.isBlank() || src.startsWith("data:")) continue
+            // Posters are not always .jpg files — Twitter's image CDN
+            // serves them as media/<id>?format=jpg — so judge by name
+            // and position, not by file extension.
+            if (skip.any { it in src.lowercase() }) continue
+            return fixUrlNull(src)
+        }
+        return null
+    }
+
+    private suspend fun fetchPoster(url: String): String? {
+        return try {
+            val doc = app.get(url).document
+            fixUrlNull(doc.selectFirst("meta[property=og:image]")?.attr("content"))
+                ?: doc.firstPost().posterFromPost()
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private suspend fun List<ThreadItem>.toSearchResponses(
+        enrich: Int
+    ): List<SearchResponse> {
+        val posters: List<String?> = if (enrich > 0) {
+            coroutineScope {
+                mapIndexed { index, item ->
+                    async { if (index < enrich) fetchPoster(item.href) else null }
+                }.awaitAll()
+            }
+        } else {
+            map { null }
+        }
+        return mapIndexed { index, item ->
+            newMovieSearchResponse(item.title, item.href, TvType.Movie) {
+                this.posterUrl = posters[index]
+                if (posters[index] != null) {
+                    this.posterHeaders = mapOf("Referer" to mainUrl)
+                }
+            }
+        }
     }
 
     override suspend fun getMainPage(
@@ -223,7 +288,8 @@ class OneTamilMVProvider : MainAPI() {
         // Homepage / What's New are not reliably paginated — page 1 only.
         if (page > 1) return newHomePageResponse(request, emptyList(), hasNext = false)
         val document = getDocument(fixUrl(request.data))
-        return newHomePageResponse(request, document.extractThreads(), hasNext = false)
+        val items = document.extractThreads().toSearchResponses(enrich = 24)
+        return newHomePageResponse(request, items, hasNext = false)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -233,7 +299,7 @@ class OneTamilMVProvider : MainAPI() {
         try {
             val doc = getDocument("$mainUrl/index.php?/search/&q=$encoded")
             val results = doc.extractThreads()
-            if (results.isNotEmpty()) return results
+            if (results.isNotEmpty()) return results.toSearchResponses(enrich = 20)
         } catch (e: Exception) {
             // fall through to the scan below
         }
@@ -246,9 +312,9 @@ class OneTamilMVProvider : MainAPI() {
             emptyList()
         }
         return latest.filter { item ->
-            val title = item.name.lowercase()
+            val title = item.title.lowercase()
             tokens.all { it in title }
-        }
+        }.toSearchResponses(enrich = 20)
     }
 
     // ------------------------------------------------------------------
@@ -269,26 +335,11 @@ class OneTamilMVProvider : MainAPI() {
         val title = cleanThreadTitle(rawTitle)
 
         // First post = the release post holding poster + links.
-        // Invision markup first, legacy XenForo selectors as fallback.
-        val post = document.selectFirst(
-            "div.cPost_contentWrap, [data-role=commentContent], " +
-                "div.ipsType_richText, article.message-body, div.bbWrapper"
-        ) ?: document.body()
+        val post = document.firstPost()
 
         val poster = fixUrlNull(
             document.selectFirst("meta[property=og:image]")?.attr("content")
-        ) ?: post.select("img").firstOrNull { img ->
-            // Real posters are content images inside the post; skip the
-            // site's decoration (logo, torrent borders, uTorrent button).
-            val src = img.absUrl("src").ifBlank { img.attr("src") }
-            src.isNotBlank() &&
-                !src.contains("logo") && !src.contains("avatar") &&
-                !src.contains("torrborder") && !src.contains("uTorrent") &&
-                !src.contains("smilie") && !src.contains("emoji") &&
-                !src.startsWith("data:") &&
-                Regex("\\.(jpg|jpeg|webp)(\\?|$)", RegexOption.IGNORE_CASE)
-                    .containsMatchIn(src)
-        }?.let { fixUrlNull(it.absUrl("src").ifBlank { it.attr("src") }) }
+        ) ?: post.posterFromPost()
 
         val plot = post.text().take(2000).ifBlank { null }
         val year = Regex("(19|20)\\d{2}").find(title)?.value?.toIntOrNull()
