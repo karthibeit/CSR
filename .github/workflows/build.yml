@@ -5,6 +5,12 @@ concurrency:
   group: "build"
   cancel-in-progress: true
 
+# The repo's default workflow token is read-only, which made the final
+# "Push builds" step fail with 403 in Build run #4. Grant this workflow
+# write access to repo contents so it can publish to the builds branch.
+permissions:
+  contents: write
+
 on:
   push:
     branches:
