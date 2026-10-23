@@ -1,1 +1,8 @@
-{"description":"CloudStream extension for the 1TamilMV forum — Tamil, Telugu, Malayalam, Kannada and Hindi releases","manifestVersion":1,"name":"OneTamilMV","pluginLists":["https://raw.githubusercontent.com/karthibeit/cloudstream-onetamilmv/builds/plugins.json"]}
+{
+  "name": "OneTamilMV",
+  "description": "CloudStream extension for the 1TamilMV forum — Tamil, Telugu, Malayalam, Kannada and Hindi releases",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://raw.githubusercontent.com/karthibeit/Cloudstream-onetamilmv/builds/plugins.json"
+  ]
+}
