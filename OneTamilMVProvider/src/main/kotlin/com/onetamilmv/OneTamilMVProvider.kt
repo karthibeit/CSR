@@ -249,7 +249,7 @@ class OneTamilMVProvider : MainAPI() {
             }
         }
 
-        return newMovieLoadResponse(title, url, TvType.Movie, toJson(links.values.toList())) {
+        return newMovieLoadResponse(title, url, TvType.Movie, links.values.toList().toJson()) {
             this.posterUrl = poster
             this.plot = plot
             this.year = year
