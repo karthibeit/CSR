@@ -294,7 +294,11 @@ class OneTamilMVProvider : MainAPI() {
         val year = Regex("(19|20)\\d{2}").find(title)?.value?.toIntOrNull()
 
         // Collect every usable link from the first post.
+        // Each quality block is: <.torrent filename link> <MAGNET button>
+        // <DIRECT LINK button>. The filename text is remembered so the
+        // DIRECT LINK of the same block can inherit its quality label.
         val links = LinkedHashMap<String, OneTamilMVLink>()
+        var blockLabel = ""
         post.select("a[href]").forEach { a ->
             val href = a.attr("href").trim()
             if (href.isBlank() || href.startsWith("#")) return@forEach
@@ -312,6 +316,20 @@ class OneTamilMVProvider : MainAPI() {
                     text
                 }
             }
+            if (label.length > 25 &&
+                (label.contains(".mkv", true) || label.contains(".torrent", true))
+            ) {
+                blockLabel = label
+            }
+            // The DIRECT LINK button's own text carries no quality info —
+            // tag it so loadLinks can resolve and prioritise it.
+            val isDirectButton = a.hasClass("download-button") ||
+                label.equals("DIRECT LINK", true)
+            val storedLabel = if (isDirectButton) {
+                "DIRECT | " + blockLabel.ifBlank { "Direct Link" }
+            } else {
+                label
+            }
             val isMagnet = href.startsWith("magnet:")
             val isTorrent = href.endsWith(".torrent") ||
                 href.contains("/attachments/") || href.contains("attachment.php")
@@ -322,7 +340,7 @@ class OneTamilMVProvider : MainAPI() {
                 !href.contains("facebook.com") && !href.contains("twitter.com") &&
                 !href.contains("t.me") && !href.contains("telegram")
             if (isMagnet || isTorrent || isDirectVideo || isExternalHost) {
-                links.putIfAbsent(href, OneTamilMVLink(href, label))
+                links.putIfAbsent(href, OneTamilMVLink(href, storedLabel))
             }
         }
 
@@ -348,6 +366,49 @@ class OneTamilMVProvider : MainAPI() {
         }
     }
 
+    /** Display order: playable direct files first, torrents/magnets last. */
+    private fun linkPriority(link: OneTamilMVLink): Int {
+        return when {
+            link.label.startsWith("DIRECT |") -> 0
+            Regex("\\.(mp4|mkv|avi|m3u8)(\\?|$)", RegexOption.IGNORE_CASE)
+                .containsMatchIn(link.url) -> 1
+            link.url.startsWith("magnet:") -> 3
+            link.url.endsWith(".torrent") || link.url.contains("/attachments/") ||
+                link.url.contains("attachment.php") -> 4
+            else -> 2
+        }
+    }
+
+    /**
+     * Resolve a DIRECT LINK shortener chain to the final file URL.
+     * Verified live 2026-10-23: cyberloom.best/l/<code> redirects to an
+     * interstitial page whose "Continue to Destination" (/out?t=) link
+     * redirects to a file page that carries the direct CDN file link.
+     * Handing the raw shortener URL to the player fails with a
+     * "parsing container" error, so resolving here is required.
+     */
+    private suspend fun resolveShortLink(url: String): String? {
+        return try {
+            val hop1 = app.get(url).document
+            val outUrl = hop1.select("a[href*=/out?t=]").firstOrNull()
+                ?.absUrl("href")?.ifBlank { null }
+                ?: hop1.select("a").firstOrNull {
+                    it.text().contains("Continue", ignoreCase = true)
+                }?.absUrl("href")?.ifBlank { null }
+                ?: return null
+            val hop2 = app.get(outUrl).document
+            hop2.select("a[href]").mapNotNull {
+                it.absUrl("href").ifBlank { null }
+            }.firstOrNull { candidate ->
+                candidate.contains("/files/") &&
+                    Regex("\\.(mkv|mp4|avi)(\\?|$)", RegexOption.IGNORE_CASE)
+                        .containsMatchIn(candidate)
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -361,9 +422,43 @@ class OneTamilMVProvider : MainAPI() {
         }
 
         var found = false
-        links.forEach { link ->
+        links.sortedBy { linkPriority(it) }.forEach { link ->
             val quality = parseQuality(link.label + " " + link.url)
             when {
+                link.label.startsWith("DIRECT |") -> {
+                    // Shortened DIRECT LINK — resolve it to the real file
+                    // first; only fall back to the raw URL if that fails.
+                    val shortLabel = link.label.removePrefix("DIRECT | ")
+                    val resolved = resolveShortLink(link.url)
+                    when {
+                        resolved != null -> {
+                            callback.invoke(
+                                newExtractorLink(
+                                    name, "Direct — $shortLabel", resolved,
+                                    ExtractorLinkType.VIDEO
+                                ) {
+                                    this.quality = quality
+                                }
+                            )
+                            found = true
+                        }
+                        loadExtractor(link.url, mainUrl, subtitleCallback, callback) -> {
+                            found = true
+                        }
+                        else -> {
+                            callback.invoke(
+                                newExtractorLink(
+                                    name, "Direct — $shortLabel", link.url,
+                                    ExtractorLinkType.VIDEO
+                                ) {
+                                    this.quality = quality
+                                    this.referer = mainUrl
+                                }
+                            )
+                            found = true
+                        }
+                    }
+                }
                 link.url.startsWith("magnet:") -> {
                     callback.invoke(
                         newExtractorLink(name, "Magnet — ${link.label}", link.url, ExtractorLinkType.MAGNET) {
