@@ -272,13 +272,67 @@ class OneTamilMVProvider : MainAPI() {
             map { null }
         }
         return mapIndexed { index, item ->
-            newMovieSearchResponse(item.title, item.href, TvType.Movie) {
-                this.posterUrl = posters[index]
-                if (posters[index] != null) {
-                    this.posterHeaders = mapOf("Referer" to mainUrl)
+            val poster = posters[index]
+            val headers = if (poster != null) mapOf("Referer" to mainUrl) else null
+            if (isSeriesTitle(item.title)) {
+                newTvSeriesSearchResponse(item.title, item.href, TvType.TvSeries) {
+                    this.posterUrl = poster
+                    this.posterHeaders = headers
+                }
+            } else {
+                newMovieSearchResponse(item.title, item.href, TvType.Movie) {
+                    this.posterUrl = poster
+                    this.posterHeaders = headers
                 }
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Series detection
+    //
+    // Web-series topics are season packs: the post holds one torrent /
+    // magnet per EPISODE BATCH ("EP (85-88)") per quality, newest batch
+    // first, and each batch torrent contains the individual episode
+    // files (verified by decoding a .torrent 2026-10-23: EP (85-88)
+    // 1080p holds S01E85–E88 as separate .mkv files). Series topics get
+    // a real episode list; movies keep the single Play button.
+    // ------------------------------------------------------------------
+
+    /** Episode span carried by a title or file label, e.g. EP (85-88). */
+    private fun episodeRangeOf(text: String): Pair<Int, Int>? {
+        Regex("""EP\s*\(?\s*(\d{1,4})\s*[-–]\s*(\d{1,4})""", RegexOption.IGNORE_CASE)
+            .find(text)?.let {
+                val a = it.groupValues[1].toInt()
+                val b = it.groupValues[2].toInt()
+                if (a >= 1 && b >= a && b - a <= 500) return a to b
+            }
+        Regex("""S\d{1,2}\s*E(\d{1,4})\s*[-–]\s*E?(\d{1,4})""", RegexOption.IGNORE_CASE)
+            .find(text)?.let {
+                val a = it.groupValues[1].toInt()
+                val b = it.groupValues[2].toInt()
+                if (a >= 1 && b >= a && b - a <= 500) return a to b
+            }
+        Regex("""S\d{1,2}\s*E(\d{1,4})""", RegexOption.IGNORE_CASE)
+            .find(text)?.let {
+                val n = it.groupValues[1].toInt()
+                if (n >= 1) return n to n
+            }
+        Regex("""\bEP\s*\(?\s*(\d{1,4})\s*\)?""", RegexOption.IGNORE_CASE)
+            .find(text)?.let {
+                val n = it.groupValues[1].toInt()
+                if (n >= 1) return n to n
+            }
+        return null
+    }
+
+    private fun isSeriesTitle(title: String): Boolean {
+        if (!Regex("""\bS\d{1,2}\b""", RegexOption.IGNORE_CASE).containsMatchIn(title)) {
+            return false
+        }
+        return episodeRangeOf(title) != null ||
+            title.contains("Season", ignoreCase = true) ||
+            title.contains("Episode", ignoreCase = true)
     }
 
     override suspend fun getMainPage(
@@ -392,6 +446,47 @@ class OneTamilMVProvider : MainAPI() {
                 !href.contains("t.me") && !href.contains("telegram")
             if (isMagnet || isTorrent || isDirectVideo || isExternalHost) {
                 links.putIfAbsent(href, OneTamilMVLink(href, storedLabel))
+            }
+        }
+
+        // Web series: group the links by the episode batch in their file
+        // labels and hand CloudStream a real episode list (ascending).
+        // Every episode of a batch points at that batch's links — the
+        // batch torrent/magnet contains the individual episode files.
+        val season = Regex("""\bS(\d{1,2})\b""", RegexOption.IGNORE_CASE)
+            .find(title)?.groupValues?.get(1)?.toIntOrNull()
+        if (season != null && isSeriesTitle(title)) {
+            val batches = LinkedHashMap<Pair<Int, Int>, MutableList<OneTamilMVLink>>()
+            links.values.forEach { link ->
+                val range = episodeRangeOf(link.label) ?: return@forEach
+                batches.getOrPut(range) { mutableListOf() }.add(link)
+            }
+            val episodes = mutableListOf<Episode>()
+            batches.forEach { (range, batchLinks) ->
+                val data = batchLinks.toJson()
+                for (n in range.first..range.second) {
+                    episodes.add(newEpisode(data) {
+                        this.name = "Episode $n"
+                        this.season = season
+                        this.episode = n
+                        if (range.first != range.second) {
+                            this.description =
+                                "Batch EP ${range.first}–${range.second} — one " +
+                                    "torrent/magnet covers these episodes; pick " +
+                                    "this episode's file in your torrent app."
+                        }
+                    })
+                }
+            }
+            if (episodes.isNotEmpty()) {
+                episodes.sortBy { it.episode ?: 0 }
+                return newTvSeriesLoadResponse(
+                    title, url, TvType.TvSeries, episodes
+                ) {
+                    this.posterUrl = poster
+                    this.plot = plot
+                    this.year = year
+                }
             }
         }
 
