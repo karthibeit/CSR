@@ -1,5 +1,5 @@
 // Use an integer for version numbers — bump it on every release.
-version = 2
+version = 3
 
 cloudstream {
     description = "1TamilMV forum — Tamil, Telugu, Malayalam, Kannada and Hindi releases (magnet/torrent + direct/file-host links)"
