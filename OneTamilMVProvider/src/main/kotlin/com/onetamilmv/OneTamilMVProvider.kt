@@ -54,9 +54,16 @@ class OneTamilMVProvider : MainAPI() {
         "https://1tamilmv.app"
     )
 
+    // The current site runs Invision Community (checked live 2026-10-23):
+    // topics live under /index.php?/forums/topic/<id>-<slug>/ and the
+    // homepage carries a "RECENTLY ADDED" block of topic links.
     override val mainPage = mainPageOf(
-        "/" to "Latest Threads",
-        "/whats-new/" to "What's New"
+        "https://www.1tamilmv.solar/" to "Latest",
+        "https://www.1tamilmv.solar/index.php?/forums/forum/9-tamil-language/" to "Tamil",
+        "https://www.1tamilmv.solar/index.php?/forums/forum/22-telugu-language/" to "Telugu",
+        "https://www.1tamilmv.solar/index.php?/forums/forum/56-hindi-language/" to "Hindi",
+        "https://www.1tamilmv.solar/index.php?/forums/forum/34-malayalam-language/" to "Malayalam",
+        "https://www.1tamilmv.solar/index.php?/forums/forum/67-kannada-language/" to "Kannada"
     )
 
     // ------------------------------------------------------------------
@@ -118,44 +125,93 @@ class OneTamilMVProvider : MainAPI() {
     // ------------------------------------------------------------------
 
     private fun cleanThreadTitle(raw: String): String {
-        return raw
+        var t = raw
             .replace(Regex("\\s*\\|\\s*1TamilMV.*$", RegexOption.IGNORE_CASE), "")
             .replace(Regex("\\s*-\\s*1TamilMV.*$", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("\\s+"), " ")
             .trim()
+        // Listings append the quality bracket to the title: "Title - [4K, ...]"
+        val bracket = t.indexOf(" - [")
+        if (bracket > 8) t = t.substring(0, bracket).trim()
+        return t.trim().trimEnd('-', '–').trim()
     }
 
-    private fun Element.toThreadSearchResult(): SearchResponse? {
-        val link = this.selectFirst("a[href*=/threads/]") ?: return null
-        val href = fixUrl(link.attr("href"))
-        if (href.contains("/latest") || href.contains("/post-") ||
-            href.contains("/members/") || href.contains("/page-")
-        ) return null
-        val title = cleanThreadTitle(link.text())
-        if (title.length < 4) return null
-        // Forum listings have no movie poster (it lives in the first post,
-        // load() fills it in), so posterUrl stays null here.
-        return newMovieSearchResponse(title, href, TvType.Movie) {
-            this.posterUrl = null
-        }
+    /** True when a text looks like a quality/tag bracket, not a title. */
+    private fun String.looksLikeTag(): Boolean {
+        val s = trim()
+        return s.startsWith("[") || s.equals("MAGNET", true) ||
+            s.equals("Watch Online", true) || s.length < 4
     }
+
+    /** Derive a readable title from a topic URL slug (last-resort fallback). */
+    private fun titleFromSlug(href: String): String {
+        val slug = href.substringAfter("/forums/topic/", "")
+            .substringAfter("/threads/", "")
+        val noId = slug.replace(Regex("^\\d+-"), "").trim('/')
+        return try {
+            java.net.URLDecoder.decode(noId, "UTF-8")
+        } catch (e: Exception) {
+            noId
+        }.replace('-', ' ').replace(Regex("\\s+"), " ").trim()
+    }
+
+    /**
+     * Best title for a topic anchor. On the homepage the title sits in the
+     * <strong> right before the quality-bracket link; in forum/search
+     * listings the anchor text itself is the title.
+     */
+    private fun Element.topicTitle(href: String): String {
+        val attrTitle = attr("title").trim()
+        if (!attrTitle.looksLikeTag() && attrTitle.length >= 8) {
+            return cleanThreadTitle(attrTitle)
+        }
+        val own = text().trim()
+        if (!own.looksLikeTag() && own.length >= 8) return cleanThreadTitle(own)
+
+        // Walk up a few levels checking previous siblings for the title text.
+        val chain = listOf(this) + parents().take(3)
+        for (el in chain) {
+            val prevText = el.previousElementSibling()?.text()?.trim().orEmpty()
+            if (prevText.length >= 8 && !prevText.looksLikeTag()) {
+                return cleanThreadTitle(prevText)
+            }
+        }
+        return cleanThreadTitle(titleFromSlug(href))
+    }
+
+    private val topicUrlRegex = Regex("/forums/topic/\\d+[-/]|/threads/[^/]*\\.?\\d+")
 
     private fun Document.extractThreads(): List<SearchResponse> {
         val seen = mutableSetOf<String>()
         val results = mutableListOf<SearchResponse>()
 
-        // Primary: XenForo thread list rows.
-        this.select("div.structItem--thread, li.block-row").forEach { row ->
-            row.toThreadSearchResult()?.let {
-                if (seen.add(it.url)) results.add(it)
-            }
-        }
-        // Fallback: any thread anchor on the page.
-        if (results.isEmpty()) {
-            this.select("a[href*=/threads/]").forEach { a ->
-                a.toThreadSearchResult()?.let {
-                    if (seen.add(it.url)) results.add(it)
-                }
-            }
+        // Generic pass over every topic anchor (Invision /forums/topic/ and
+        // legacy XenForo /threads/ links both work with this).
+        this.select("a[href*=/forums/topic/], a[href*=/threads/]").forEach { a ->
+            val rawHref = a.absUrl("href").ifBlank { a.attr("href") }
+            val href = fixUrl(rawHref)
+            if (!topicUrlRegex.containsMatchIn(href)) return@forEach
+            if (href.contains("/page/") || href.contains("#")) return@forEach
+            if (!seen.add(href)) return@forEach
+            val title = a.topicTitle(href)
+            if (title.length < 4) return@forEach
+            // Sidebar/widget headings that can get mistaken for titles.
+            if (title.lowercase() in setOf(
+                    "languages", "top releases this week", "recently added",
+                    "trending", "latest posts", "popular topics"
+                )
+            ) return@forEach
+            // Poster thumbs ride along in forum listings when present.
+            val poster = a.parents().take(4)
+                .flatMap { it.select("img") }
+                .firstOrNull { img ->
+                    val src = img.absUrl("src").ifBlank { img.attr("src") }
+                    src.isNotBlank() && !src.contains("avatar") &&
+                        !src.contains("logo") && !src.contains("emoji")
+                }?.let { fixUrlNull(it.absUrl("src").ifBlank { it.attr("src") }) }
+            results.add(newMovieSearchResponse(title, href, TvType.Movie) {
+                this.posterUrl = poster
+            })
         }
         return results
     }
@@ -173,16 +229,16 @@ class OneTamilMVProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val encoded = URLEncoder.encode(query, "UTF-8")
 
-        // 1) XenForo search endpoint (works when the mirror allows guest search).
+        // 1) Invision guest search (verified working for guests 2026-10-23).
         try {
-            val doc = getDocument("$mainUrl/search/?keywords=$encoded&o=date")
+            val doc = getDocument("$mainUrl/index.php?/search/&q=$encoded")
             val results = doc.extractThreads()
             if (results.isNotEmpty()) return results
         } catch (e: Exception) {
             // fall through to the scan below
         }
 
-        // 2) Fallback: scan the latest threads and match the title locally.
+        // 2) Fallback: scan the homepage and match titles locally.
         val tokens = query.lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }
         val latest = try {
             getDocument(mainUrl).extractThreads()
@@ -213,19 +269,26 @@ class OneTamilMVProvider : MainAPI() {
         val title = cleanThreadTitle(rawTitle)
 
         // First post = the release post holding poster + links.
+        // Invision markup first, legacy XenForo selectors as fallback.
         val post = document.selectFirst(
-            "article.message-body, div.bbWrapper, div.message-content"
+            "div.cPost_contentWrap, [data-role=commentContent], " +
+                "div.ipsType_richText, article.message-body, div.bbWrapper"
         ) ?: document.body()
 
         val poster = fixUrlNull(
             document.selectFirst("meta[property=og:image]")?.attr("content")
         ) ?: post.select("img").firstOrNull { img ->
-            val src = img.attr("src")
+            // Real posters are content images inside the post; skip the
+            // site's decoration (logo, torrent borders, uTorrent button).
+            val src = img.absUrl("src").ifBlank { img.attr("src") }
             src.isNotBlank() &&
-                !src.contains("/styles/") && !src.contains("avatar") &&
+                !src.contains("logo") && !src.contains("avatar") &&
+                !src.contains("torrborder") && !src.contains("uTorrent") &&
                 !src.contains("smilie") && !src.contains("emoji") &&
-                !src.startsWith("data:")
-        }?.let { fixUrlNull(it.attr("src")) }
+                !src.startsWith("data:") &&
+                Regex("\\.(jpg|jpeg|webp)(\\?|$)", RegexOption.IGNORE_CASE)
+                    .containsMatchIn(src)
+        }?.let { fixUrlNull(it.absUrl("src").ifBlank { it.attr("src") }) }
 
         val plot = post.text().take(2000).ifBlank { null }
         val year = Regex("(19|20)\\d{2}").find(title)?.value?.toIntOrNull()
@@ -235,9 +298,23 @@ class OneTamilMVProvider : MainAPI() {
         post.select("a[href]").forEach { a ->
             val href = a.attr("href").trim()
             if (href.isBlank() || href.startsWith("#")) return@forEach
-            val label = a.text().trim().ifBlank { href }
+            // Magnet buttons just say "MAGNET" — use the torrent's own
+            // display name (dn=) as the label, it carries quality + size.
+            val label = a.text().trim().ifBlank { href }.let { text ->
+                if (href.startsWith("magnet:") && text.length < 12) {
+                    val dn = Regex("[&?]dn=([^&]+)").find(href)?.groupValues?.get(1)
+                    try {
+                        dn?.let { java.net.URLDecoder.decode(it, "UTF-8") } ?: text
+                    } catch (e: Exception) {
+                        text
+                    }
+                } else {
+                    text
+                }
+            }
             val isMagnet = href.startsWith("magnet:")
-            val isTorrent = href.endsWith(".torrent") || href.contains("/attachments/")
+            val isTorrent = href.endsWith(".torrent") ||
+                href.contains("/attachments/") || href.contains("attachment.php")
             val isDirectVideo = Regex("\\.(mp4|mkv|avi|m3u8)(\\?|$)", RegexOption.IGNORE_CASE)
                 .containsMatchIn(href)
             val isExternalHost = href.startsWith("http") &&
@@ -295,7 +372,8 @@ class OneTamilMVProvider : MainAPI() {
                     )
                     found = true
                 }
-                link.url.endsWith(".torrent") || link.url.contains("/attachments/") -> {
+                link.url.endsWith(".torrent") || link.url.contains("/attachments/") ||
+                    link.url.contains("attachment.php") -> {
                     callback.invoke(
                         newExtractorLink(name, "Torrent — ${link.label}", link.url, ExtractorLinkType.TORRENT) {
                             this.quality = quality
