@@ -60,9 +60,12 @@ class TMLProvider : MainAPI() {
     // The current site runs Invision Community (checked live 2026-10-23):
     // topics live under /index.php?/forums/topic/<id>-<slug>/ and the
     // homepage carries a "RECENTLY ADDED" block of topic links.
-    // Every Tamil sub-forum is its own main-page section, so each
-    // menu shows all of its movies instead of one latest topic.
+    // Homepage widgets first, then every Tamil sub-forum as its own
+    // main-page section, so each menu shows all of its movies
+    // instead of one latest topic.
     override val mainPage = mainPageOf(
+        "https://www.1tamilmv.solar/#top-releases" to "Top Releases",
+        "https://www.1tamilmv.solar/#recently-added" to "Recently Added",
         "https://www.1tamilmv.solar/index.php?/forums/forum/10-predvd-dvdscr-cam-tc/" to "PreDVD",
         "https://www.1tamilmv.solar/index.php?/forums/forum/11-web-hd-itunes-hd-bluray/" to "WEB-HD",
         "https://www.1tamilmv.solar/index.php?/forums/forum/12-hd-rips-dvd-rips-br-rips/" to "HD-Rips",
@@ -238,6 +241,43 @@ class TMLProvider : MainAPI() {
         return out
     }
 
+    /**
+     * Topics inside a homepage "banger" widget (TOP RELEASES THIS WEEK /
+     * RECENTLY ADDED). Each entry is a pair of <strong> elements: the
+     * first carries the title ("Baththa (2026) Tamil HD + HC-ESub -"),
+     * the second carries the topic link (quality bracket) plus an
+     * external [W] watch link (ignored — it is not a topic URL).
+     * Some entries instead put the link inside the title <strong>.
+     */
+    private fun Element.extractBangerThreads(limit: Int): List<ThreadItem> {
+        val seen = mutableSetOf<String>()
+        val results = mutableListOf<ThreadItem>()
+        var lastTitle = ""
+        for (strong in this.select("strong")) {
+            val anchor = strong.selectFirst("a[href*=/forums/topic/]")
+            if (anchor == null) {
+                val t = cleanThreadTitle(strong.text().trim())
+                if (t.length >= 8 && !t.looksLikeTag()) lastTitle = t
+                continue
+            }
+            val rawHref = anchor.absUrl("href").ifBlank { anchor.attr("href") }
+            val href = fixUrl(rawHref)
+            if (!topicUrlRegex.containsMatchIn(href)) continue
+            if (href.contains("/page/") || href.contains("#")) continue
+            if (!seen.add(href)) continue
+            val ownText = cleanThreadTitle(strong.text().trim())
+            val title = when {
+                ownText.length >= 8 && !ownText.looksLikeTag() -> ownText
+                lastTitle.length >= 8 -> lastTitle
+                else -> anchor.topicTitle(href)
+            }
+            if (title.length < 4) continue
+            results.add(ThreadItem(title, href))
+            if (results.size >= limit) break
+        }
+        return results
+    }
+
     // ------------------------------------------------------------------
     // Posters
     //
@@ -369,6 +409,19 @@ class TMLProvider : MainAPI() {
         // Homepage / What's New are not reliably paginated — page 1 only.
         if (page > 1) return newHomePageResponse(request, emptyList(), hasNext = false)
         val document = getDocument(fixUrl(request.data))
+        // Homepage widgets: Top Releases / Recently Added.
+        if (request.name == "Top Releases" || request.name == "Recently Added") {
+            val key = if (request.name == "Top Releases") "TOP RELEASES" else "RECENTLY ADDED"
+            val container = document.select("div.banger-container").firstOrNull {
+                it.selectFirst(".banger-header")?.text()?.contains(key, ignoreCase = true) == true
+            }
+            val widgetItems = container?.extractBangerThreads(limit = 50)
+                ?.toSearchResponses(enrich = 24)
+            if (!widgetItems.isNullOrEmpty()) {
+                return newHomePageResponse(request, widgetItems, hasNext = false)
+            }
+            // Fall through to the generic parse if the widget is missing.
+        }
         val subForums = document.extractSubForums()
         if (subForums.isNotEmpty()) {
             // Category page: descend into each sub-forum (one extra level
