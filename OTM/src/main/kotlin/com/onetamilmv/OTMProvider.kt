@@ -211,6 +211,26 @@ class OTMProvider : MainAPI() {
         return results
     }
 
+    /**
+     * Sub-forum links on a forum CATEGORY page (e.g. "Tamil Language").
+     * A category page lists one "latest post" topic per sub-forum, so
+     * parsing it directly yields only ~1 movie per submenu. The real
+     * sub-forum rows live in div.cForumList — navigation links to the
+     * other languages live outside it and must NOT be followed, or the
+     * Tamil section would fill up with Telugu/Hindi/etc. topics.
+     */
+    private fun Document.extractSubForums(): List<String> {
+        val seen = mutableSetOf<String>()
+        val out = mutableListOf<String>()
+        this.select("div.cForumList h4 a[href*=/forums/forum/]").forEach { a ->
+            val raw = a.absUrl("href").ifBlank { a.attr("href") }
+            val href = fixUrl(raw)
+            if (!Regex("/forums/forum/\\d+-").containsMatchIn(href)) return@forEach
+            if (seen.add(href)) out.add(href)
+        }
+        return out
+    }
+
     // ------------------------------------------------------------------
     // Posters
     //
@@ -342,6 +362,41 @@ class OTMProvider : MainAPI() {
         // Homepage / What's New are not reliably paginated — page 1 only.
         if (page > 1) return newHomePageResponse(request, emptyList(), hasNext = false)
         val document = getDocument(fixUrl(request.data))
+        val subForums = document.extractSubForums()
+        if (subForums.isNotEmpty()) {
+            // Category page: descend into each sub-forum (one extra level
+            // for nested categories) and merge their topics, so a
+            // language section shows every movie, not just the latest
+            // topic of each submenu.
+            val seenHrefs = mutableSetOf<String>()
+            val merged = mutableListOf<ThreadItem>()
+            fun addAll(items: List<ThreadItem>) {
+                for (t in items) if (seenHrefs.add(t.href)) merged.add(t)
+            }
+            addAll(document.extractThreads())
+            val queue = ArrayDeque(subForums)
+            val visited = mutableSetOf(fixUrl(request.data))
+            var fetches = 0
+            while (queue.isNotEmpty() && fetches < 20 && merged.size < 300) {
+                val forumUrl = queue.removeFirst()
+                if (!visited.add(forumUrl)) continue
+                fetches++
+                try {
+                    val subDoc = getDocument(forumUrl)
+                    addAll(subDoc.extractThreads())
+                    for (nested in subDoc.extractSubForums()) {
+                        if (nested !in visited) queue.addLast(nested)
+                    }
+                } catch (e: Exception) {
+                    continue
+                }
+            }
+            if (merged.isNotEmpty()) {
+                return newHomePageResponse(
+                    request, merged.toSearchResponses(enrich = 24), hasNext = false
+                )
+            }
+        }
         val items = document.extractThreads().toSearchResponses(enrich = 24)
         return newHomePageResponse(request, items, hasNext = false)
     }
