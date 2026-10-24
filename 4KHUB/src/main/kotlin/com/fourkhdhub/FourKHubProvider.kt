@@ -412,17 +412,21 @@ class FourKHubProvider : MainAPI() {
             if (buttons.isEmpty()) buttons = page.select("a.btn[href]")
 
             val seen = mutableSetOf<String>()
-            fun direct(url: String, server: String) {
-                if (url.isBlank() || !seen.add(url)) return
-                emitted++
-                emit(
-                    newExtractorLink(
-                        name, "$label [$server]", url, ExtractorLinkType.VIDEO
-                    ) {
-                        this.quality = quality
-                        this.referer = mainUrl
-                    }
-                )
+            // Suspend lambda, not a local fun: in the pinned library
+            // newExtractorLink is a suspend function, and Build #39
+            // failed calling it from a plain nested fun.
+            val direct: suspend (String, String) -> Unit = { url, server ->
+                if (url.isNotBlank() && seen.add(url)) {
+                    emitted++
+                    emit(
+                        newExtractorLink(
+                            name, "$label [$server]", url, ExtractorLinkType.VIDEO
+                        ) {
+                            this.quality = quality
+                            this.referer = mainUrl
+                        }
+                    )
+                }
             }
 
             for (el in buttons) {
