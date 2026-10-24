@@ -355,6 +355,92 @@ class OTMProvider : MainAPI() {
             title.contains("Episode", ignoreCase = true)
     }
 
+    // ------------------------------------------------------------------
+    // Wikipedia summaries for the detail-page description.
+    //
+    // The detail page used to show the forum post's raw text (release
+    // titles, resolutions, sizes, torrent/magnet labels). Karthi asked
+    // for real movie details instead (2026-10-24). TMDB was tried
+    // first: its website is Cloudflare-blocked for app requests and
+    // its API needs a key, so he chose Wikipedia summaries (no key).
+    // Matching is deliberately strict — the Wikipedia title must equal
+    // the movie name and, when the year is known, the search snippet
+    // must contain that year — so a wrong film is never shown; when
+    // nothing matches, the caller keeps the post text.
+    // ------------------------------------------------------------------
+
+    private data class WikiSearchResponse(
+        @JsonProperty("query") val query: WikiSearchQuery?
+    )
+
+    private data class WikiSearchQuery(
+        @JsonProperty("search") val search: List<WikiSearchResult>?
+    )
+
+    private data class WikiSearchResult(
+        @JsonProperty("title") val title: String?,
+        @JsonProperty("snippet") val snippet: String?
+    )
+
+    private data class WikiSummary(
+        @JsonProperty("extract") val extract: String?,
+        @JsonProperty("type") val type: String?
+    )
+
+    /** "Gajab Raat (2026) TRUE WEB-DL" -> ("Gajab Raat", "2026"). */
+    private fun cleanMovieTitle(title: String): Pair<String, String?> {
+        val m = Regex("""^(.*?)\s*\(((?:19|20)\d{2})\)""").find(title)
+        if (m != null) return m.groupValues[1].trim() to m.groupValues[2]
+        return title.trim() to null
+    }
+
+    /** Lowercased, "&" -> "and", trailing "(...)" and punctuation stripped. */
+    private fun normWikiTitle(s: String): String {
+        var t = s.lowercase().replace("&", " and ")
+        t = Regex("""\s*\([^)]*\)\s*$""").replace(t, "")
+        t = Regex("""[^a-z0-9 ]""").replace(t, "")
+        return t.trim().replace(Regex("""\s+"""), " ")
+    }
+
+    private suspend fun fetchWikiSummary(title: String): String? {
+        return try {
+            val (name, year) = cleanMovieTitle(title)
+            if (name.length < 2) return null
+            val query = URLEncoder.encode(
+                if (year != null) "$name $year film" else "$name film", "UTF-8"
+            )
+            val search: WikiSearchResponse = parseJson(
+                app.get(
+                    "https://en.wikipedia.org/w/api.php?action=query&list=search" +
+                        "&srsearch=$query&format=json&formatversion=2&srlimit=10"
+                ).text
+            )
+            val exact = search.query?.search.orEmpty().filter { r ->
+                val t = r.title.orEmpty()
+                !t.startsWith("List of", ignoreCase = true) &&
+                    normWikiTitle(t) == normWikiTitle(name)
+            }
+            val pick = if (year != null) {
+                exact.firstOrNull { r ->
+                    year in r.snippet.orEmpty().replace(Regex("<[^>]+>"), "")
+                } ?: return null
+            } else {
+                exact.firstOrNull() ?: return null
+            }
+            val pageTitle = pick.title ?: return null
+            val page = URLEncoder.encode(
+                pageTitle.replace(" ", "_"), "UTF-8"
+            ).replace("+", "%20")
+            val summary: WikiSummary = parseJson(
+                app.get("https://en.wikipedia.org/api/rest_v1/page/summary/$page").text
+            )
+            if (summary.type == "disambiguation") return null
+            summary.extract?.takeIf { it.isNotBlank() }?.take(2000)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
@@ -450,7 +536,8 @@ class OTMProvider : MainAPI() {
             document.selectFirst("meta[property=og:image]")?.attr("content")
         ) ?: post.posterFromPost()
 
-        val plot = post.text().take(2000).ifBlank { null }
+        val plot = fetchWikiSummary(title)
+            ?: post.text().take(2000).ifBlank { null }
         val year = Regex("(19|20)\\d{2}").find(title)?.value?.toIntOrNull()
 
         // Collect every usable link from the first post.
