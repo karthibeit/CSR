@@ -1,7 +1,9 @@
 package com.fourkhdhub
 
 import com.fasterxml.jackson.annotation.JsonProperty
+import android.webkit.CookieManager
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -53,6 +55,13 @@ import java.net.URLEncoder
  *    strategies) and HubCloud stage is logged (tag "4KHUB") and,
  *    when nothing playable is produced, surfaced as "DIAG:" link
  *    names so the exact failing stage is readable on-device.
+ *  - v4 (2026-10-24): root cause found — from the user's network,
+ *    greenmotors.club serves a Cloudflare "Verify you are human"
+ *    challenge (confirmed by his Chrome screenshot), so plain HTTP
+ *    requests never receive the mediator page. v4 keeps the v3
+ *    diagnostics and adds a WebView Cloudflare solve (the app's
+ *    own CloudflareKiller recipe) for the mediator, plus the same
+ *    solve-and-retry for the HubCloud drive and gamerxyt pages.
  *  - Detail pages also embed a Videasy player iframe; its TMDB id is
  *    kept as a "Watch Online" link entry as a fallback.
  */
@@ -352,6 +361,63 @@ class FourKHubProvider : MainAPI() {
     private fun shortUrl(u: String): String =
         u.removePrefix("https://").removePrefix("http://").take(48)
 
+    // v4: Cloudflare. From the user's network, greenmotors.club
+    // answers plain HTTP clients with a "Verify you are human"
+    // challenge page (confirmed in his Chrome), so no blob ever
+    // arrives and every resolve fails instantly. The fix is the
+    // app's own CloudflareKiller recipe: solve the challenge once
+    // in a real WebView, then replay requests with the WebView's
+    // user agent + cf_clearance cookie. Solved headers are cached
+    // per host; hosts whose solve failed are not retried.
+    private val cfSolvedHeaders = mutableMapOf<String, Map<String, String>>()
+    private val cfSolveFailedHosts = mutableSetOf<String>()
+
+    private suspend fun solveCloudflare(
+        url: String,
+        diag: MutableList<String>? = null
+    ): Map<String, String> {
+        val host = runCatching { java.net.URI(url).host }.getOrNull()
+            ?: return emptyMap()
+        cfSolvedHeaders[host]?.let { return it }
+        if (host in cfSolveFailedHosts) return emptyMap()
+        return try {
+            WebViewResolver(
+                interceptUrl = Regex(".^"),
+                userAgent = null,
+                useOkhttp = false,
+                additionalUrls = listOf(Regex(".")),
+                timeout = 30_000L
+            ).resolveUsingWebView(url) {
+                val cookie = runCatching {
+                    CookieManager.getInstance().getCookie(url)
+                }.getOrNull()
+                cookie?.contains("cf_clearance") == true
+            }
+            val cookie = runCatching {
+                CookieManager.getInstance().getCookie(url)
+            }.getOrNull()
+            diagLog(
+                diag,
+                "cf-solve $host: clearance=${cookie?.contains("cf_clearance") == true}"
+            )
+            if (cookie.isNullOrBlank()) {
+                cfSolveFailedHosts += host
+                return emptyMap()
+            }
+            val headers = mutableMapOf("Cookie" to cookie)
+            WebViewResolver.webViewUserAgent?.let { headers["User-Agent"] = it }
+            cfSolvedHeaders[host] = headers
+            headers
+        } catch (e: Exception) {
+            diagLog(
+                diag,
+                "cf-solve $host: EXC ${e.javaClass.simpleName}: ${e.message?.take(80)}"
+            )
+            cfSolveFailedHosts += host
+            emptyMap()
+        }
+    }
+
     /**
      * Resolve a greenmotors mediator link to the real HubCloud /
      * HubDrive URL. Tries, in order: (A) browser headers with
@@ -381,9 +447,19 @@ class FourKHubProvider : MainAPI() {
             return decoded
         }
 
-        // Attempt A: browser headers, redirects followed.
+        // Attempt A: browser headers, redirects followed. When a
+        // Cloudflare clearance was already solved for this host,
+        // its headers (WebView UA + cf_clearance cookie) replace
+        // the generic ones — the clearance is bound to that UA.
+        val host = runCatching { java.net.URI(url).host }.getOrNull()
+        val cachedCf = host?.let { cfSolvedHeaders[it] }
         try {
-            val page = app.get(url, headers = browserHeaders(referer))
+            val aHeaders = if (cachedCf != null) {
+                browserHeaders(referer) + cachedCf
+            } else {
+                browserHeaders(referer)
+            }
+            val page = app.get(url, headers = aHeaders)
             inspect("A", page.text, page.url, runCatching { page.code }.getOrDefault(-1))
                 ?.let { return it }
         } catch (e: Exception) {
@@ -435,6 +511,46 @@ class FourKHubProvider : MainAPI() {
         } catch (e: Exception) {
             diagLog(diag, "D: EXC ${e.javaClass.simpleName}: ${e.message?.take(90)}")
         }
+
+        // Attempt E (v4): the plain attempts all received a
+        // Cloudflare challenge page instead of the mediator page.
+        // Solve the challenge in a WebView, replay with the solved
+        // headers; if the replay's redirect target is challenged
+        // too, follow it manually and solve that host as well.
+        try {
+            if (cachedCf != null && host != null) {
+                // Stale clearance: force a fresh solve.
+                cfSolvedHeaders.remove(host)
+                cfSolveFailedHosts.remove(host)
+            }
+            val solved = solveCloudflare(url, diag)
+            if (solved.isNotEmpty()) {
+                val headers = solved.toMutableMap()
+                headers["Referer"] = referer.ifBlank { "$mainUrl/" }
+                val page = app.get(url, headers = headers)
+                inspect("E", page.text, page.url, runCatching { page.code }.getOrDefault(-1))
+                    ?.let { return it }
+                val first = app.get(
+                    url, headers = headers, allowRedirects = false
+                )
+                val loc = first.headers["Location"]?.takeIf { it.isNotBlank() }
+                if (loc != null && loc.contains("greenmotors")) {
+                    val solvedCc = solveCloudflare(loc, diag)
+                    val ccHeaders = (solvedCc.ifEmpty { solved }).toMutableMap()
+                    if (!ccHeaders.containsKey("User-Agent")) {
+                        solved["User-Agent"]?.let { ccHeaders["User-Agent"] = it }
+                    }
+                    ccHeaders["Referer"] = "https://greenmotors.club/"
+                    val ccPage = app.get(loc, headers = ccHeaders)
+                    inspect(
+                        "E2", ccPage.text, ccPage.url,
+                        runCatching { ccPage.code }.getOrDefault(-1)
+                    )?.let { return it }
+                }
+            }
+        } catch (e: Exception) {
+            diagLog(diag, "E: EXC ${e.javaClass.simpleName}: ${e.message?.take(90)}")
+        }
         return null
     }
 
@@ -454,20 +570,44 @@ class FourKHubProvider : MainAPI() {
     ): Int {
         var emitted = 0
         try {
-            val doc = app.get(driveUrl).document
-            var gamerUrl = doc.selectFirst("#download")?.attr("href")
-                .orEmpty()
-            if (gamerUrl.isNotBlank() && !gamerUrl.startsWith("http")) {
-                val base = Regex("""^(https?://[^/]+)""").find(driveUrl)
-                    ?.groupValues?.get(1).orEmpty()
-                gamerUrl = base + "/" + gamerUrl.trimStart('/')
+            fun gamerOf(d: Document): String {
+                var g = d.selectFirst("#download")?.attr("href").orEmpty()
+                if (g.isNotBlank() && !g.startsWith("http")) {
+                    val base = Regex("""^(https?://[^/]+)""").find(driveUrl)
+                        ?.groupValues?.get(1).orEmpty()
+                    g = base + "/" + g.trimStart('/')
+                }
+                return g
+            }
+            var gamerUrl = gamerOf(app.get(driveUrl).document)
+            if (gamerUrl.isBlank()) {
+                // Possibly a Cloudflare challenge page instead of
+                // the drive page: solve in a WebView and retry once
+                // with the clearance headers.
+                val solved = solveCloudflare(driveUrl, diag)
+                if (solved.isNotEmpty()) {
+                    gamerUrl = gamerOf(app.get(driveUrl, headers = solved).document)
+                }
             }
             if (gamerUrl.isBlank()) {
                 diagLog(diag, "hub: NO #download button on drive page")
                 return 0
             }
 
-            val page = app.get(gamerUrl).document
+            var page = app.get(gamerUrl).document
+            var buttons = page.select("div.card-body h2 a.btn")
+            if (buttons.isEmpty()) buttons = page.select("a.btn[href]")
+            if (buttons.isEmpty()) {
+                // Possibly a Cloudflare challenge page here too:
+                // solve and retry once with the clearance headers.
+                val solvedG = solveCloudflare(gamerUrl, diag)
+                if (solvedG.isNotEmpty()) {
+                    page = app.get(gamerUrl, headers = solvedG).document
+                    buttons = page.select("div.card-body h2 a.btn")
+                    if (buttons.isEmpty()) buttons = page.select("a.btn[href]")
+                }
+            }
+            diagLog(diag, "hub: gamer page buttons=${buttons.size}")
             val header = page.selectFirst("div.card-header")?.text().orEmpty()
             val quality = Regex("""(\d{3,4})[pP]""").find(header)
                 ?.groupValues?.get(1)?.toIntOrNull()
@@ -482,10 +622,6 @@ class FourKHubProvider : MainAPI() {
                         else -> fallbackQuality
                     }
                 } ?: fallbackQuality
-
-            var buttons = page.select("div.card-body h2 a.btn")
-            if (buttons.isEmpty()) buttons = page.select("a.btn[href]")
-            diagLog(diag, "hub: gamer page buttons=${buttons.size}")
 
             val seen = mutableSetOf<String>()
             // Suspend lambda, not a local fun: in the pinned library
