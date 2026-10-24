@@ -177,9 +177,12 @@ class FourKHubProvider : MainAPI() {
             .firstOrNull { it.text().trim().length > 40 }?.text()?.trim()
             ?: document.selectFirst("meta[property=og:description]")
                 ?.attr("content")
-        val rating = document.selectFirst(".imdb-badge")?.text()
+        // The pinned CloudStream library removed LoadResponse.rating
+        // (DeprecationLevel.ERROR) in favour of Score — Build #36
+        // failed on this, 2026-10-24.
+        val score = document.selectFirst(".imdb-badge")?.text()
             ?.let { Regex("""\d+(\.\d+)?""").find(it)?.value?.toDoubleOrNull() }
-            ?.let { (it * 10).toInt() }
+            ?.let { Score.from10(it) }
         val tags = document.select(".badge-outline")
             .map { it.text().trim() }
             .filter { it.isNotBlank() }
@@ -212,7 +215,7 @@ class FourKHubProvider : MainAPI() {
                 this.posterUrl = poster
                 this.year = year
                 this.plot = plot
-                this.rating = rating
+                this.score = score
                 this.tags = tags
                 this.actors = actors
             }
@@ -266,7 +269,7 @@ class FourKHubProvider : MainAPI() {
             this.posterUrl = poster
             this.year = year
             this.plot = plot
-            this.rating = rating
+            this.score = score
             this.tags = tags
             this.actors = actors
         }
