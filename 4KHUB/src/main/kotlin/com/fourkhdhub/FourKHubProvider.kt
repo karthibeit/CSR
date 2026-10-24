@@ -1,7 +1,13 @@
 package com.fourkhdhub
 
 import com.fasterxml.jackson.annotation.JsonProperty
+import android.app.Activity
+import android.app.Dialog
 import android.webkit.CookieManager
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.widget.LinearLayout
+import android.widget.TextView
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
@@ -62,6 +68,17 @@ import java.net.URLEncoder
  *    diagnostics and adds a WebView Cloudflare solve (the app's
  *    own CloudflareKiller recipe) for the mediator, plus the same
  *    solve-and-retry for the HubCloud drive and gamerxyt pages.
+ *    Confirmed on-device the same day: works with the VPN off (his
+ *    real IP passes the check silently); with the VPN on, the
+ *    distrusted exit IP makes even the hidden solve fail.
+ *  - v5 (2026-10-24): when the hidden solve fails, fall back to a
+ *    VISIBLE verification dialog (the "verify once — unlocks every
+ *    link" flow Karthi showed from another provider): a dialog
+ *    WebView on the current Activity (found via ActivityThread
+ *    reflection, since plugins only get the application context)
+ *    lets the user tap the Cloudflare checkbox; once cf_clearance
+ *    exists, the dialog closes and the solved headers are cached
+ *    per host and replayed as before.
  *  - Detail pages also embed a Videasy player iframe; its TMDB id is
  *    kept as a "Watch Online" link entry as a fallback.
  */
@@ -371,51 +388,206 @@ class FourKHubProvider : MainAPI() {
     // per host; hosts whose solve failed are not retried.
     private val cfSolvedHeaders = mutableMapOf<String, Map<String, String>>()
     private val cfSolveFailedHosts = mutableSetOf<String>()
+    private val cfInteractiveFailedHosts = mutableSetOf<String>()
 
     private suspend fun solveCloudflare(
         url: String,
-        diag: MutableList<String>? = null
+        diag: MutableList<String>? = null,
+        interactive: Boolean = false
     ): Map<String, String> {
         val host = runCatching { java.net.URI(url).host }.getOrNull()
             ?: return emptyMap()
         cfSolvedHeaders[host]?.let { return it }
-        if (host in cfSolveFailedHosts) return emptyMap()
-        return try {
-            WebViewResolver(
-                interceptUrl = Regex(".^"),
-                userAgent = null,
-                useOkhttp = false,
-                additionalUrls = listOf(Regex(".")),
-                timeout = 30_000L
-            ).resolveUsingWebView(url) {
+        if (host !in cfSolveFailedHosts) {
+            val solved = try {
+                WebViewResolver(
+                    interceptUrl = Regex(".^"),
+                    userAgent = null,
+                    useOkhttp = false,
+                    additionalUrls = listOf(Regex(".")),
+                    timeout = 20_000L
+                ).resolveUsingWebView(url) {
+                    val cookie = runCatching {
+                        CookieManager.getInstance().getCookie(url)
+                    }.getOrNull()
+                    cookie?.contains("cf_clearance") == true
+                }
                 val cookie = runCatching {
                     CookieManager.getInstance().getCookie(url)
                 }.getOrNull()
-                cookie?.contains("cf_clearance") == true
+                diagLog(
+                    diag,
+                    "cf-solve $host: clearance=${cookie?.contains("cf_clearance") == true}"
+                )
+                if (cookie.isNullOrBlank()) {
+                    null
+                } else {
+                    val headers = mutableMapOf("Cookie" to cookie)
+                    WebViewResolver.webViewUserAgent?.let {
+                        headers["User-Agent"] = it
+                    }
+                    headers
+                }
+            } catch (e: Exception) {
+                diagLog(
+                    diag,
+                    "cf-solve $host: EXC ${e.javaClass.simpleName}: ${e.message?.take(80)}"
+                )
+                null
             }
-            val cookie = runCatching {
-                CookieManager.getInstance().getCookie(url)
-            }.getOrNull()
+            if (solved != null) {
+                cfSolvedHeaders[host] = solved
+                return solved
+            }
+            cfSolveFailedHosts += host
+        }
+        // Hidden solving failed (e.g. the network's IP is distrusted
+        // and Cloudflare demands a human tap): fall back to a
+        // visible verification dialog the user can tap, the same
+        // "verify once" flow some other providers use.
+        if (interactive && host !in cfInteractiveFailedHosts) {
+            val solved = solveCloudflareInteractive(url, diag)
+            if (solved.isNotEmpty()) {
+                cfSolvedHeaders[host] = solved
+                return solved
+            }
+            cfInteractiveFailedHosts += host
+        }
+        return emptyMap()
+    }
+
+    /**
+     * The currently resumed Activity, found via ActivityThread
+     * reflection (plugins only ever see the application context,
+     * which cannot host a dialog). Null when unavailable — the
+     * caller then simply keeps the hidden-solve behaviour.
+     */
+    private fun currentActivity(): Activity? {
+        return try {
+            val thread = Class.forName("android.app.ActivityThread")
+                .getMethod("currentActivityThread").invoke(null) ?: return null
+            val field = thread.javaClass.getDeclaredField("mActivities")
+            field.isAccessible = true
+            val activities = field.get(thread) as? Map<*, *> ?: return null
+            for (record in activities.values) {
+                if (record == null) continue
+                val pausedField = record.javaClass.getDeclaredField("paused")
+                pausedField.isAccessible = true
+                if (pausedField.getBoolean(record)) continue
+                val activityField = record.javaClass.getDeclaredField("activity")
+                activityField.isAccessible = true
+                (activityField.get(record) as? Activity)?.let { return it }
+            }
+            null
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * v5: visible Cloudflare verification. Shows a dialog with a
+     * real WebView on the challenge URL; the user taps "Verify you
+     * are human" if asked, and as soon as a cf_clearance cookie
+     * exists the dialog closes and the solved headers (WebView UA
+     * + cookies) are returned for replay — once per host, the
+     * clearance then unlocks every link.
+     */
+    private suspend fun solveCloudflareInteractive(
+        url: String,
+        diag: MutableList<String>? = null
+    ): Map<String, String> {
+        val host = runCatching { java.net.URI(url).host }.getOrNull()
+        val activity = currentActivity()
+        if (activity == null) {
+            diagLog(diag, "cf-interactive $host: no activity found")
+            return emptyMap()
+        }
+        val cancelled = java.util.concurrent.atomic.AtomicBoolean(false)
+        var dialog: Dialog? = null
+        var webView: WebView? = null
+        var webViewUa: String? = null
+        try {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                val density = activity.resources.displayMetrics.density
+                fun dp(v: Int): Int = (v * density).toInt()
+                val container = LinearLayout(activity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dp(20), dp(16), dp(20), dp(12))
+                }
+                val title = TextView(activity).apply {
+                    text = "Verify once — unlocks every link"
+                    textSize = 18f
+                    setPadding(0, 0, 0, dp(12))
+                }
+                val wv = WebView(activity).apply {
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                }
+                val status = TextView(activity).apply {
+                    text = "Widget loaded — solving…"
+                    setPadding(0, dp(12), 0, 0)
+                }
+                container.addView(title)
+                container.addView(
+                    wv,
+                    LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, dp(430)
+                    )
+                )
+                container.addView(status)
+                val d = Dialog(activity)
+                d.setContentView(container)
+                d.setCancelable(true)
+                d.setOnCancelListener { cancelled.set(true) }
+                wv.webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView?, u: String?) {
+                        status.text =
+                            "If a checkbox is shown above, tap \u201cVerify you are human\u201d."
+                    }
+                }
+                webViewUa = wv.settings.userAgentString
+                wv.loadUrl(url)
+                d.show()
+                d.window?.setLayout(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+                dialog = d
+                webView = wv
+            }
+            diagLog(diag, "cf-interactive $host: dialog shown")
+            val deadline = System.currentTimeMillis() + 120_000L
+            while (System.currentTimeMillis() < deadline) {
+                if (cancelled.get()) break
+                val cookie = runCatching {
+                    CookieManager.getInstance().getCookie(url)
+                }.getOrNull()
+                if (cookie?.contains("cf_clearance") == true) {
+                    diagLog(diag, "cf-interactive $host: clearance OK")
+                    val headers = mutableMapOf("Cookie" to cookie)
+                    webViewUa?.let { headers["User-Agent"] = it }
+                    return headers
+                }
+                kotlinx.coroutines.delay(600)
+            }
             diagLog(
                 diag,
-                "cf-solve $host: clearance=${cookie?.contains("cf_clearance") == true}"
+                "cf-interactive $host: no clearance (cancelled=${cancelled.get()})"
             )
-            if (cookie.isNullOrBlank()) {
-                cfSolveFailedHosts += host
-                return emptyMap()
-            }
-            val headers = mutableMapOf("Cookie" to cookie)
-            WebViewResolver.webViewUserAgent?.let { headers["User-Agent"] = it }
-            cfSolvedHeaders[host] = headers
-            headers
         } catch (e: Exception) {
             diagLog(
                 diag,
-                "cf-solve $host: EXC ${e.javaClass.simpleName}: ${e.message?.take(80)}"
+                "cf-interactive $host: EXC ${e.javaClass.simpleName}: ${e.message?.take(80)}"
             )
-            cfSolveFailedHosts += host
-            emptyMap()
+        } finally {
+            runCatching {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    runCatching { dialog?.dismiss() }
+                    runCatching { webView?.destroy() }
+                }
+            }
         }
+        return emptyMap()
     }
 
     /**
@@ -523,7 +695,7 @@ class FourKHubProvider : MainAPI() {
                 cfSolvedHeaders.remove(host)
                 cfSolveFailedHosts.remove(host)
             }
-            val solved = solveCloudflare(url, diag)
+            val solved = solveCloudflare(url, diag, interactive = true)
             if (solved.isNotEmpty()) {
                 val headers = solved.toMutableMap()
                 headers["Referer"] = referer.ifBlank { "$mainUrl/" }
@@ -535,7 +707,7 @@ class FourKHubProvider : MainAPI() {
                 )
                 val loc = first.headers["Location"]?.takeIf { it.isNotBlank() }
                 if (loc != null && loc.contains("greenmotors")) {
-                    val solvedCc = solveCloudflare(loc, diag)
+                    val solvedCc = solveCloudflare(loc, diag, interactive = true)
                     val ccHeaders = (solvedCc.ifEmpty { solved }).toMutableMap()
                     if (!ccHeaders.containsKey("User-Agent")) {
                         solved["User-Agent"]?.let { ccHeaders["User-Agent"] = it }
@@ -584,7 +756,7 @@ class FourKHubProvider : MainAPI() {
                 // Possibly a Cloudflare challenge page instead of
                 // the drive page: solve in a WebView and retry once
                 // with the clearance headers.
-                val solved = solveCloudflare(driveUrl, diag)
+                val solved = solveCloudflare(driveUrl, diag, interactive = true)
                 if (solved.isNotEmpty()) {
                     gamerUrl = gamerOf(app.get(driveUrl, headers = solved).document)
                 }
@@ -600,7 +772,7 @@ class FourKHubProvider : MainAPI() {
             if (buttons.isEmpty()) {
                 // Possibly a Cloudflare challenge page here too:
                 // solve and retry once with the clearance headers.
-                val solvedG = solveCloudflare(gamerUrl, diag)
+                val solvedG = solveCloudflare(gamerUrl, diag, interactive = true)
                 if (solvedG.isNotEmpty()) {
                     page = app.get(gamerUrl, headers = solvedG).document
                     buttons = page.select("div.card-body h2 a.btn")
