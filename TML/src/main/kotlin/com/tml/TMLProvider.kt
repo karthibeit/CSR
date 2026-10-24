@@ -35,6 +35,16 @@ import java.net.URLEncoder
  * CloudStream library as "No support at the moment", so magnet/torrent
  * entries are surfaced for download / external handling, while direct
  * (.mp4/.mkv/.m3u8) and file-host links are the playable ones.
+ *
+ * v3 (2026-10-24): home/menus were very slow — every section borrowed
+ * posters for 24 cards (one topic-page download each) and forum
+ * sections wandered sub-forums (up to 20 extra fetches, 300 merged
+ * topics), so a home load could exceed 300 page downloads. v3 caps
+ * poster borrowing at the first 8 cards per section, gives each
+ * poster fetch a 6s timeout, caches fetched documents for 60s (the
+ * homepage is requested by two sections), and drops the sub-forum
+ * wandering — sections show their own page of topics, with a single
+ * one-level merge only for category pages that list no topics.
  */
 class TMLProvider : MainAPI() {
 
@@ -93,8 +103,25 @@ class TMLProvider : MainAPI() {
         }
     }
 
+    // v3 speedup: the home screen asks for the same homepage twice
+    // (Top Releases + Recently Added differ only by URL fragment)
+    // and sections repeat across visits, so fetched documents are
+    // cached briefly, keyed by URL without its fragment.
+    private val docCache =
+        java.util.concurrent.ConcurrentHashMap<String, Pair<Long, Document>>()
+
+    private fun cachedDocument(url: String): Document? {
+        val entry = docCache[url.substringBefore('#')] ?: return null
+        return if (System.currentTimeMillis() - entry.first < 60_000L) {
+            entry.second
+        } else {
+            null
+        }
+    }
+
     /** GET a page, walking the fallback domains if the current one is dead. */
     private suspend fun getDocument(url: String): Document {
+        cachedDocument(url)?.let { return it }
         val candidates = buildList {
             add(url)
             fallbackDomains.forEach { domain ->
@@ -123,6 +150,8 @@ class TMLProvider : MainAPI() {
                         } catch (e: Exception) {
                             // keep the previous mainUrl
                         }
+                        docCache[url.substringBefore('#')] =
+                            System.currentTimeMillis() to doc
                         return doc
                     }
                 }
@@ -317,12 +346,16 @@ class TMLProvider : MainAPI() {
     }
 
     private suspend fun fetchPoster(url: String): String? {
-        return try {
-            val doc = app.get(url).document
-            fixUrlNull(doc.selectFirst("meta[property=og:image]")?.attr("content"))
-                ?: doc.firstPost().posterFromPost()
-        } catch (e: Exception) {
-            null
+        // v3: a single slow topic page must not stall its whole
+        // section — give up on that poster after a few seconds.
+        return kotlinx.coroutines.withTimeoutOrNull(6_000L) {
+            try {
+                val doc = app.get(url).document
+                fixUrlNull(doc.selectFirst("meta[property=og:image]")?.attr("content"))
+                    ?: doc.firstPost().posterFromPost()
+            } catch (e: Exception) {
+                null
+            }
         }
     }
 
@@ -502,49 +535,41 @@ class TMLProvider : MainAPI() {
                 it.selectFirst(".banger-header")?.text()?.contains(key, ignoreCase = true) == true
             }
             val widgetItems = container?.extractBangerThreads(limit = 50)
-                ?.toSearchResponses(enrich = 24)
+                ?.toSearchResponses(enrich = 8)
             if (!widgetItems.isNullOrEmpty()) {
                 return newHomePageResponse(request, widgetItems, hasNext = false)
             }
             // Fall through to the generic parse if the widget is missing.
         }
-        val subForums = document.extractSubForums()
-        if (subForums.isNotEmpty()) {
-            // Category page: descend into each sub-forum (one extra level
-            // for nested categories) and merge their topics, so a
-            // language section shows every movie, not just the latest
-            // topic of each submenu.
+        // v3 speedup: a section shows its own page of topics. The old
+        // code descended into every sub-forum (up to 20 extra page
+        // fetches, up to 300 merged topics) and then borrowed posters
+        // for 24 cards per section — with 13 sections the home screen
+        // needed 300+ page downloads. Now posters are borrowed for
+        // the first 8 cards only (the ones visible without
+        // scrolling); the rest get their poster on the detail page.
+        var threads = document.extractThreads()
+        if (threads.isEmpty()) {
+            // Category-style page with no topics of its own: take a
+            // single page from each sub-forum — no deep wandering.
             val seenHrefs = mutableSetOf<String>()
             val merged = mutableListOf<ThreadItem>()
-            fun addAll(items: List<ThreadItem>) {
-                for (t in items) if (seenHrefs.add(t.href)) merged.add(t)
-            }
-            addAll(document.extractThreads())
-            val queue = ArrayDeque(subForums)
-            val visited = mutableSetOf(fixUrl(request.data))
-            var fetches = 0
-            while (queue.isNotEmpty() && fetches < 20 && merged.size < 300) {
-                val forumUrl = queue.removeFirst()
-                if (!visited.add(forumUrl)) continue
-                fetches++
+            for (forumUrl in document.extractSubForums().take(12)) {
                 try {
                     val subDoc = getDocument(forumUrl)
-                    addAll(subDoc.extractThreads())
-                    for (nested in subDoc.extractSubForums()) {
-                        if (nested !in visited) queue.addLast(nested)
+                    for (t in subDoc.extractThreads()) {
+                        if (seenHrefs.add(t.href)) merged.add(t)
                     }
                 } catch (e: Exception) {
                     continue
                 }
+                if (merged.size >= 100) break
             }
-            if (merged.isNotEmpty()) {
-                return newHomePageResponse(
-                    request, merged.toSearchResponses(enrich = 24), hasNext = false
-                )
-            }
+            threads = merged
         }
-        val items = document.extractThreads().toSearchResponses(enrich = 24)
-        return newHomePageResponse(request, items, hasNext = false)
+        return newHomePageResponse(
+            request, threads.toSearchResponses(enrich = 8), hasNext = false
+        )
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
