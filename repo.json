@@ -3,6 +3,6 @@
   "description": "CloudStream extension for the 1TamilMV forum \u2014 Tamil, Telugu, Malayalam, Kannada and Hindi releases",
   "manifestVersion": 1,
   "pluginLists": [
-    "https://cdn.jsdelivr.net/gh/karthibeit/CSR@736da28bf945ba49f669939ac4a05c97f021b2bb/plugins.json"
+    "https://cdn.jsdelivr.net/gh/karthibeit/CSR@8168fc6eea518065377496a04b60476a2aaa6bc5/plugins.json"
   ]
 }
