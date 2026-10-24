@@ -45,6 +45,17 @@ import java.net.URLEncoder
  * homepage is requested by two sections), and drops the sub-forum
  * wandering — sections show their own page of topics, with a single
  * one-level merge only for category pages that list no topics.
+ *
+ * v4 (2026-10-24): Web Series section moved to right after WEB-HD
+ * (Karthi's requested order). Series fixes: titles that spell out
+ * "Season 1" (no S01 token) now get episode lists too; when no link
+ * label carries an episode marker, episodes fall back to the
+ * title's EP range with all links as one batch; screenshot image
+ * anchors (pixelbb) are no longer collected as download links.
+ * Note on playback: series topics hold magnet/torrent links only,
+ * so in-app episode playback depends on the app's torrent support
+ * (Settings → Providers → Preferred media must include Torrent,
+ * plus the one-time "Stream Torrent" acceptance popup).
  */
 class TMLProvider : MainAPI() {
 
@@ -78,6 +89,7 @@ class TMLProvider : MainAPI() {
         "https://www.1tamilmv.solar/#recently-added" to "Recently Added",
         "https://www.1tamilmv.solar/index.php?/forums/forum/10-predvd-dvdscr-cam-tc/" to "PreDVD",
         "https://www.1tamilmv.solar/index.php?/forums/forum/11-web-hd-itunes-hd-bluray/" to "WEB-HD",
+        "https://www.1tamilmv.solar/index.php?/forums/forum/19-web-series-tv-shows/" to "Web Series",
         "https://www.1tamilmv.solar/index.php?/forums/forum/12-hd-rips-dvd-rips-br-rips/" to "HD-Rips",
         "https://www.1tamilmv.solar/index.php?/forums/forum/13-dvd9-dvd5/" to "DVD9",
         "https://www.1tamilmv.solar/index.php?/forums/forum/14-hdtv-sdtv-hdtv-rips/" to "HDTV",
@@ -85,7 +97,6 @@ class TMLProvider : MainAPI() {
         "https://www.1tamilmv.solar/index.php?/forums/forum/16-video-songs/" to "Video Songs",
         "https://www.1tamilmv.solar/index.php?/forums/forum/17-hollywood-movies-in-multi-audios/" to "Hollywood Multi Audio",
         "https://www.1tamilmv.solar/index.php?/forums/forum/18-cinema-news-reviews-general-videos/" to "Cinema News",
-        "https://www.1tamilmv.solar/index.php?/forums/forum/19-web-series-tv-shows/" to "Web Series",
         "https://www.1tamilmv.solar/index.php?/forums/forum/102-watch-tamil-movies-online/" to "Watch Online"
     )
 
@@ -427,9 +438,14 @@ class TMLProvider : MainAPI() {
     }
 
     private fun isSeriesTitle(title: String): Boolean {
-        if (!Regex("""\bS\d{1,2}\b""", RegexOption.IGNORE_CASE).containsMatchIn(title)) {
-            return false
-        }
+        // v4: also accept "Season 1" style titles — the old check
+        // required an "S01" token, so series whose titles spell out
+        // "Season" were treated as movies and got no episode list.
+        val hasSeasonMarker =
+            Regex("""\bS\d{1,2}\b""", RegexOption.IGNORE_CASE).containsMatchIn(title) ||
+                Regex("""\bSeason\s*\d{1,2}\b""", RegexOption.IGNORE_CASE)
+                    .containsMatchIn(title)
+        if (!hasSeasonMarker) return false
         return episodeRangeOf(title) != null ||
             title.contains("Season", ignoreCase = true) ||
             title.contains("Episode", ignoreCase = true)
@@ -648,6 +664,17 @@ class TMLProvider : MainAPI() {
                     text
                 }
             }
+            // v4: screenshot image anchors (pixelbb /image/ pages
+            // wrapping a vlcsnap still) are not downloads — without
+            // this they were collected as "external host" links and
+            // polluted the playable link list.
+            if (label == href && a.selectFirst("img") != null &&
+                (href.contains("pixelbb", ignoreCase = true) ||
+                    href.contains("/image/", ignoreCase = true)) &&
+                !href.startsWith("magnet:") && !href.contains("attachment.php")
+            ) {
+                return@forEach
+            }
             if (label.length > 25 &&
                 (label.contains(".mkv", true) || label.contains(".torrent", true))
             ) {
@@ -682,11 +709,26 @@ class TMLProvider : MainAPI() {
         // batch torrent/magnet contains the individual episode files.
         val season = Regex("""\bS(\d{1,2})\b""", RegexOption.IGNORE_CASE)
             .find(title)?.groupValues?.get(1)?.toIntOrNull()
-        if (season != null && isSeriesTitle(title)) {
+            ?: Regex("""Season\s*(\d{1,2})\b""", RegexOption.IGNORE_CASE)
+                .find(title)?.groupValues?.get(1)?.toIntOrNull()
+            ?: 1
+        if (isSeriesTitle(title)) {
             val batches = LinkedHashMap<Pair<Int, Int>, MutableList<OneTamilMVLink>>()
             links.values.forEach { link ->
                 val range = episodeRangeOf(link.label) ?: return@forEach
                 batches.getOrPut(range) { mutableListOf() }.add(link)
+            }
+            if (batches.isEmpty()) {
+                // v4: no link label carries an episode marker (some
+                // posts label batches only in the topic title) —
+                // fall back to the title's range with all links, so
+                // the episodes still get data instead of the series
+                // silently degrading to a movie with no episodes.
+                episodeRangeOf(title)?.let { range ->
+                    if (links.isNotEmpty()) {
+                        batches[range] = links.values.toMutableList()
+                    }
+                }
             }
             val episodes = mutableListOf<Episode>()
             batches.forEach { (range, batchLinks) ->
