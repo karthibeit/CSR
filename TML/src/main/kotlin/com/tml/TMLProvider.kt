@@ -9,9 +9,15 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URI
@@ -56,6 +62,18 @@ import java.net.URLEncoder
  * so in-app episode playback depends on the app's torrent support
  * (Settings → Providers → Preferred media must include Torrent,
  * plus the one-time "Stream Torrent" acceptance popup).
+ *
+ * v5 (2026-10-24): Karthi's loading pattern — first load shows the
+ * first 8 cards with thumbnails fast (as v3/v4), and ALL remaining
+ * thumbnails load later instead of staying blank. CloudStream hands
+ * each section to the UI exactly once, so a poster cannot be pushed
+ * into an already-shown card; instead the remaining posters are
+ * fetched in the background (max 6 at a time, de-duplicated) into a
+ * session poster cache, and every card — first 8 or not — uses the
+ * cache instantly when it already has the poster. Net effect: first
+ * open is fast with 8 thumbnails per section, the rest fill the
+ * cache in the background, and a refresh / reopening of TML shows
+ * every thumbnail immediately.
  */
 class TMLProvider : MainAPI() {
 
@@ -356,10 +374,30 @@ class TMLProvider : MainAPI() {
         return null
     }
 
+    // v5: session poster cache (topic URL -> poster URL). Once a
+    // poster has been fetched — in the foreground, in the
+    // background, or on a detail page — every later list shows it
+    // instantly, including cards beyond the first-8 fast batch.
+    private val posterCache =
+        java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    // Topics whose poster is currently being fetched in the
+    // background, so overlapping sections never fetch one twice.
+    private val posterInFlight =
+        java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    // Background poster fetching must outlive the getMainPage /
+    // search call that started it, so it runs on its own scope.
+    private val posterScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    // Keep background traffic gentle: at most 6 poster pages at once.
+    private val posterSemaphore = Semaphore(6)
+
     private suspend fun fetchPoster(url: String): String? {
+        posterCache[url]?.let { return it }
         // v3: a single slow topic page must not stall its whole
         // section — give up on that poster after a few seconds.
-        return kotlinx.coroutines.withTimeoutOrNull(6_000L) {
+        val poster = kotlinx.coroutines.withTimeoutOrNull(6_000L) {
             try {
                 val doc = app.get(url).document
                 fixUrlNull(doc.selectFirst("meta[property=og:image]")?.attr("content"))
@@ -368,20 +406,54 @@ class TMLProvider : MainAPI() {
                 null
             }
         }
+        if (poster != null) posterCache[url] = poster
+        return poster
+    }
+
+    /**
+     * v5: fetch these topics' posters in the background and cache
+     * them. The already-returned cards cannot be updated in place
+     * (CloudStream delivers each section once), so these thumbnails
+     * appear on the next refresh / reopening of TML — and any other
+     * section or search listing the same topic shows them at once.
+     */
+    private fun warmPostersLater(items: List<ThreadItem>) {
+        items.forEach { item ->
+            if (posterCache.containsKey(item.href)) return@forEach
+            if (!posterInFlight.add(item.href)) return@forEach
+            posterScope.launch {
+                try {
+                    posterSemaphore.withPermit { fetchPoster(item.href) }
+                } catch (e: Exception) {
+                    // A failed background poster is retried on a
+                    // later load — it must never break the UI call.
+                } finally {
+                    posterInFlight.remove(item.href)
+                }
+            }
+        }
     }
 
     private suspend fun List<ThreadItem>.toSearchResponses(
         enrich: Int
     ): List<SearchResponse> {
+        // First `enrich` cards fetch their poster before returning
+        // (the fast first load). Every other card uses the poster
+        // cache instantly when it has one, and the uncached rest are
+        // warmed in the background below (v5).
         val posters: List<String?> = if (enrich > 0) {
             coroutineScope {
                 mapIndexed { index, item ->
-                    async { if (index < enrich) fetchPoster(item.href) else null }
+                    async {
+                        if (index < enrich) fetchPoster(item.href)
+                        else posterCache[item.href]
+                    }
                 }.awaitAll()
             }
         } else {
-            map { null }
+            map { posterCache[it.href] }
         }
+        warmPostersLater(drop(enrich).filter { posterCache[it.href] == null })
         return mapIndexed { index, item ->
             val poster = posters[index]
             val headers = if (poster != null) mapOf("Referer" to mainUrl) else null
@@ -561,9 +633,10 @@ class TMLProvider : MainAPI() {
         // code descended into every sub-forum (up to 20 extra page
         // fetches, up to 300 merged topics) and then borrowed posters
         // for 24 cards per section — with 13 sections the home screen
-        // needed 300+ page downloads. Now posters are borrowed for
-        // the first 8 cards only (the ones visible without
-        // scrolling); the rest get their poster on the detail page.
+        // needed 300+ page downloads. Now the first 8 cards borrow
+        // posters before the section returns (fast first load), and
+        // v5 warms every remaining poster's cache in the background
+        // so all thumbnails show on the next load.
         var threads = document.extractThreads()
         if (threads.isEmpty()) {
             // Category-style page with no topics of its own: take a
@@ -636,6 +709,9 @@ class TMLProvider : MainAPI() {
         val poster = fixUrlNull(
             document.selectFirst("meta[property=og:image]")?.attr("content")
         ) ?: post.posterFromPost()
+        // v5: a poster fetched for the detail page also fills the
+        // list cache, so this card shows its thumbnail at once.
+        if (poster != null) posterCache[url] = poster
 
         val plot = fetchWikiSummary(title)
             ?: post.text().take(2000).ifBlank { null }
