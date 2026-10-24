@@ -45,6 +45,14 @@ import java.net.URLEncoder
  *    resolves HubCloud itself (drive page -> gamerxyt button page ->
  *    direct file hosts) and only falls back to loadExtractor when
  *    self-resolution emits nothing.
+ *  - v3 (2026-10-24): v2 still returned 0 links on-device (the
+ *    app's extension tester on the movie "Hope": load() data is
+ *    perfect, loadLinks false with 0 links in ~2s, while the same
+ *    Hope chain verifies end-to-end from a server). v3 adds
+ *    step-by-step diagnostics: every resolve attempt (4 fetch
+ *    strategies) and HubCloud stage is logged (tag "4KHUB") and,
+ *    when nothing playable is produced, surfaced as "DIAG:" link
+ *    names so the exact failing stage is readable on-device.
  *  - Detail pages also embed a Videasy player iframe; its TMDB id is
  *    kept as a "Watch Online" link entry as a fallback.
  */
@@ -327,44 +335,107 @@ class FourKHubProvider : MainAPI() {
         "Referer" to referer.ifBlank { "$mainUrl/" }
     )
 
+    // v3 diagnostics: v1 and v2 both returned "No Links Found"
+    // on-device within ~2s while every hop of the chain verifies
+    // over plain HTTP from a server, so v3 records each step and —
+    // when nothing playable was produced — surfaces the steps as
+    // link names the user can read in the player / extension tester.
+    private fun diagLog(diag: MutableList<String>?, msg: String) {
+        diag?.add(msg)
+        try {
+            android.util.Log.i("4KHUB", msg)
+        } catch (e: Throwable) {
+            // logging must never break link loading
+        }
+    }
+
+    private fun shortUrl(u: String): String =
+        u.removePrefix("https://").removePrefix("http://").take(48)
+
     /**
      * Resolve a greenmotors mediator link to the real HubCloud /
-     * HubDrive URL. v2: sends explicit browser headers (the v1 build
-     * relied on the client's referer parameter and its built-in
-     * extractors — on-device that produced "No Links Found" within a
-     * second even though the same chain works over plain HTTP, so v2
-     * resolves every hop itself). Handles both client behaviours: if
-     * the HTTP client follows the .club -> .cc redirect itself, the
-     * payload blob is already in the response; if not, the Location
-     * header is followed manually (the .cc step wants the .club
-     * origin as referer).
+     * HubDrive URL. Tries, in order: (A) browser headers with
+     * redirects followed, (B) the referer parameter, (C) a manual
+     * Location follow (the .cc step wants the .club origin as
+     * referer), (D) a plain request with no headers. The winning
+     * attempt's page carries the `s('o','<blob>',...)` payload whose
+     * decoding yields the final URL.
      */
-    private suspend fun resolveRedirector(url: String, referer: String): String? {
+    private suspend fun resolveRedirector(
+        url: String,
+        referer: String,
+        diag: MutableList<String>? = null,
+        fullAttempts: Boolean = false
+    ): String? {
         if (!url.contains("greenmotors")) return url
-        return try {
-            var page = app.get(url, headers = browserHeaders(referer))
-            var blob = extractBlob(page.text)
-            if (blob == null) {
-                val loc = page.headers["Location"]?.takeIf { it.isNotBlank() }
-                if (loc != null) {
-                    page = app.get(
-                        loc,
-                        headers = browserHeaders("https://greenmotors.club/")
-                    )
-                    blob = extractBlob(page.text)
-                }
-            }
-            if (blob == null && page.url.contains("greenmotors.cc")) {
-                page = app.get(
-                    page.url,
+
+        fun inspect(tag: String, text: String, finalUrl: String, code: Int): String? {
+            val blob = extractBlob(text)
+            diagLog(
+                diag,
+                "$tag: HTTP $code final=${shortUrl(finalUrl)} len=${text.length} blob=${blob != null}"
+            )
+            if (blob == null) return null
+            val decoded = decodeMediatorBlob(blob)
+            diagLog(diag, "$tag: decode=${decoded?.let { shortUrl(it) } ?: "FAILED"}")
+            return decoded
+        }
+
+        // Attempt A: browser headers, redirects followed.
+        try {
+            val page = app.get(url, headers = browserHeaders(referer))
+            inspect("A", page.text, page.url, runCatching { page.code }.getOrDefault(-1))
+                ?.let { return it }
+        } catch (e: Exception) {
+            diagLog(diag, "A: EXC ${e.javaClass.simpleName}: ${e.message?.take(90)}")
+        }
+        if (!fullAttempts) return null
+
+        // Attempt B: referer parameter (the v1 style).
+        try {
+            val page = app.get(url, referer = referer.ifBlank { "$mainUrl/" })
+            inspect("B", page.text, page.url, runCatching { page.code }.getOrDefault(-1))
+                ?.let { return it }
+        } catch (e: Exception) {
+            diagLog(diag, "B: EXC ${e.javaClass.simpleName}: ${e.message?.take(90)}")
+        }
+
+        // Attempt C: no redirect following; follow Location manually.
+        try {
+            val first = app.get(
+                url,
+                headers = browserHeaders(referer),
+                allowRedirects = false
+            )
+            val loc = first.headers["Location"]?.takeIf { it.isNotBlank() }
+            diagLog(
+                diag,
+                "C: HTTP ${runCatching { first.code }.getOrDefault(-1)} location=${loc?.let { shortUrl(it) }}"
+            )
+            if (loc != null) {
+                val page = app.get(
+                    loc,
                     headers = browserHeaders("https://greenmotors.club/")
                 )
-                blob = extractBlob(page.text)
+                inspect("C2", page.text, page.url, runCatching { page.code }.getOrDefault(-1))
+                    ?.let { return it }
+            } else {
+                inspect("C", first.text, first.url, runCatching { first.code }.getOrDefault(-1))
+                    ?.let { return it }
             }
-            blob?.let { decodeMediatorBlob(it) }
         } catch (e: Exception) {
-            null
+            diagLog(diag, "C: EXC ${e.javaClass.simpleName}: ${e.message?.take(90)}")
         }
+
+        // Attempt D: plain request, no headers at all.
+        try {
+            val page = app.get(url)
+            inspect("D", page.text, page.url, runCatching { page.code }.getOrDefault(-1))
+                ?.let { return it }
+        } catch (e: Exception) {
+            diagLog(diag, "D: EXC ${e.javaClass.simpleName}: ${e.message?.take(90)}")
+        }
+        return null
     }
 
     /**
@@ -378,7 +449,8 @@ class FourKHubProvider : MainAPI() {
         driveUrl: String,
         label: String,
         fallbackQuality: Int,
-        emit: (ExtractorLink) -> Unit
+        emit: (ExtractorLink) -> Unit,
+        diag: MutableList<String>? = null
     ): Int {
         var emitted = 0
         try {
@@ -390,7 +462,10 @@ class FourKHubProvider : MainAPI() {
                     ?.groupValues?.get(1).orEmpty()
                 gamerUrl = base + "/" + gamerUrl.trimStart('/')
             }
-            if (gamerUrl.isBlank()) return 0
+            if (gamerUrl.isBlank()) {
+                diagLog(diag, "hub: NO #download button on drive page")
+                return 0
+            }
 
             val page = app.get(gamerUrl).document
             val header = page.selectFirst("div.card-header")?.text().orEmpty()
@@ -410,6 +485,7 @@ class FourKHubProvider : MainAPI() {
 
             var buttons = page.select("div.card-body h2 a.btn")
             if (buttons.isEmpty()) buttons = page.select("a.btn[href]")
+            diagLog(diag, "hub: gamer page buttons=${buttons.size}")
 
             val seen = mutableSetOf<String>()
             // Suspend lambda, not a local fun: in the pinned library
@@ -497,8 +573,10 @@ class FourKHubProvider : MainAPI() {
                 }
             }
         } catch (e: Exception) {
+            diagLog(diag, "hub: EXC ${e.javaClass.simpleName}: ${e.message?.take(90)}")
             // fall through; caller tries the built-in extractor
         }
+        diagLog(diag, "hub: emitted=$emitted")
         return emitted
     }
 
@@ -537,8 +615,14 @@ class FourKHubProvider : MainAPI() {
             }
         }
 
-        for (link in links) {
-            val resolved = resolveRedirector(link.url, link.ref) ?: continue
+        val diag = mutableListOf<String>()
+        diagLog(diag, "loadLinks v3: ${links.size} stored link(s)")
+        var hubDiagUsed = false
+        var hubDriveDiagUsed = false
+        for ((index, link) in links.withIndex()) {
+            val resolved = resolveRedirector(
+                link.url, link.ref, diag, fullAttempts = index == 0
+            ) ?: continue
             when {
                 resolved.contains("videasy") -> {
                     // No built-in extractor; hand the embed to the
@@ -550,18 +634,33 @@ class FourKHubProvider : MainAPI() {
                         resolved,
                         link.name,
                         parseQuality(link.name),
-                        counting
+                        counting,
+                        if (hubDiagUsed) null else diag
                     )
+                    hubDiagUsed = true
                     if (n == 0) {
                         // Self-resolution found nothing (layout may
                         // have changed): let the built-in extractor
                         // try the same URL.
-                        loadExtractor(resolved, mainUrl, subtitleCallback, counting)
+                        val ok = loadExtractor(
+                            resolved, mainUrl, subtitleCallback, counting
+                        )
+                        diagLog(diag, "hub: built-in extractor=$ok")
                     }
                 }
                 resolved.contains("hubdrive", ignoreCase = true) ||
                     resolved.contains("hubcdn", ignoreCase = true) -> {
-                    loadExtractor(resolved, mainUrl, subtitleCallback, counting)
+                    val before = emittedCount
+                    val ok = loadExtractor(
+                        resolved, mainUrl, subtitleCallback, counting
+                    )
+                    if (!hubDriveDiagUsed) {
+                        hubDriveDiagUsed = true
+                        diagLog(
+                            diag,
+                            "hubdrive: extractor=$ok emitted=${emittedCount - before}"
+                        )
+                    }
                 }
                 resolved != link.url -> {
                     // Some other host after the redirector: if it is a
@@ -582,6 +681,27 @@ class FourKHubProvider : MainAPI() {
                 }
             }
         }
-        return emittedCount > 0
+        // v3 diagnostics: if nothing playable was produced, surface
+        // the recorded steps as link names so the failure stage is
+        // readable in the player / tester instead of a bare
+        // "No Links Found".
+        var diagShown = false
+        if (emittedCount == 0 && diag.isNotEmpty()) {
+            diag.take(10).forEach { line ->
+                try {
+                    callback.invoke(
+                        newExtractorLink(
+                            name, "DIAG: $line", "$mainUrl/", ExtractorLinkType.VIDEO
+                        ) {
+                            this.quality = Qualities.Unknown.value
+                        }
+                    )
+                    diagShown = true
+                } catch (e: Exception) {
+                    // diagnostics must never break the caller
+                }
+            }
+        }
+        return emittedCount > 0 || diagShown
     }
 }
