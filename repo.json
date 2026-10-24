@@ -1,8 +1,1 @@
-{
-  "name": "CSR",
-  "description": "CloudStream extension for the 1TamilMV forum \u2014 Tamil, Telugu, Malayalam, Kannada and Hindi releases",
-  "manifestVersion": 1,
-  "pluginLists": [
-    "https://cdn.jsdelivr.net/gh/karthibeit/CSR@fae790275a2fb983659f965d704c704fe09b1bac/plugins.json"
-  ]
-}
+{"description":"CloudStream extension for the 1TamilMV forum — Tamil, Telugu, Malayalam, Kannada and Hindi releases","manifestVersion":1,"name":"CSR","pluginLists":["https://cdn.jsdelivr.net/gh/karthibeit/CSR@d68d409debfd800e1d613c126632be6534e33a84/plugins.json"]}
