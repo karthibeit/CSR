@@ -18,10 +18,12 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URI
 import java.net.URLEncoder
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * TML — CloudStream provider for the 1TamilMV forum.
@@ -74,6 +76,19 @@ import java.net.URLEncoder
  * open is fast with 8 thumbnails per section, the rest fill the
  * cache in the background, and a refresh / reopening of TML shows
  * every thumbnail immediately.
+ *
+ * v6 (2026-10-28): batch-torrent episode selection. Series posts pack
+ * several episodes into ONE torrent per quality, and CloudStream's
+ * torrent playback otherwise starts the pack's FIRST file for every
+ * episode (Karthi: tapping EP 90 played EP 89's video). CloudStream's
+ * Torrent glue reads an "index=" value out of the link URL and hands
+ * it to its embedded TorrServer, so v6: the episode data now carries
+ * the tapped episode number; loadLinks downloads the batch's .torrent
+ * file (session-cached), parses its file list (minimal bencode), finds
+ * the episode's file index — counting EVERY file in the torrent,
+ * .pad fillers included — and appends &index=N to that quality's
+ * magnet and torrent links. Any failure falls back to the plain
+ * links (the pre-v6 behaviour).
  */
 class TMLProvider : MainAPI() {
 
@@ -695,6 +710,16 @@ class TMLProvider : MainAPI() {
         @JsonProperty("label") val label: String
     )
 
+    /**
+     * v6: series episode payload. Before v6 every episode of a batch
+     * carried the same bare link list, so loadLinks could not know
+     * WHICH episode was tapped — the episode number rides along now.
+     */
+    data class EpisodeLinkData(
+        @JsonProperty("ep") val ep: Int?,
+        @JsonProperty("links") val links: List<OneTamilMVLink>
+    )
+
     override suspend fun load(url: String): LoadResponse {
         val document = getDocument(url)
 
@@ -808,8 +833,11 @@ class TMLProvider : MainAPI() {
             }
             val episodes = mutableListOf<Episode>()
             batches.forEach { (range, batchLinks) ->
-                val data = batchLinks.toJson()
                 for (n in range.first..range.second) {
+                    // v6: each episode's data carries its own number so
+                    // loadLinks can select that episode's file inside
+                    // the batch torrent (see the v6 note at the top).
+                    val data = EpisodeLinkData(n, batchLinks).toJson()
                     episodes.add(newEpisode(data) {
                         this.name = "Episode $n"
                         this.season = season
@@ -817,8 +845,9 @@ class TMLProvider : MainAPI() {
                         if (range.first != range.second) {
                             this.description =
                                 "Batch EP ${range.first}–${range.second} — one " +
-                                    "torrent/magnet covers these episodes; pick " +
-                                    "this episode's file in your torrent app."
+                                    "torrent/magnet covers these episodes; TML " +
+                                    "sets the torrent file index so this " +
+                                    "episode plays directly."
                         }
                     })
                 }
@@ -900,16 +929,188 @@ class TMLProvider : MainAPI() {
         }
     }
 
+    // ------------------------------------------------------------------
+    // v6: batch-torrent file selection
+    // ------------------------------------------------------------------
+
+    private fun isTorrentFileLink(url: String): Boolean =
+        url.endsWith(".torrent") || url.contains("/attachments/") ||
+            url.contains("attachment.php")
+
+    private fun appendIndexParam(url: String, index: Int): String =
+        url + (if (url.contains("?")) "&" else "?") + "index=" + index
+
+    /** Session cache of parsed .torrent file lists, keyed by torrent URL. */
+    private val torrentFileCache = ConcurrentHashMap<String, List<String>>()
+
+    private suspend fun torrentFileList(url: String): List<String>? {
+        torrentFileCache[url]?.let { return it }
+        val bytes = try {
+            withContext(Dispatchers.IO) {
+                val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+                conn.connectTimeout = 15_000
+                conn.readTimeout = 15_000
+                conn.instanceFollowRedirects = true
+                conn.setRequestProperty(
+                    "User-Agent",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                )
+                conn.setRequestProperty("Referer", mainUrl)
+                conn.inputStream.use { it.readBytes() }
+            }
+        } catch (e: Exception) {
+            return null
+        }
+        val files = parseTorrentFileList(bytes) ?: return null
+        torrentFileCache[url] = files
+        return files
+    }
+
+    /** Minimal bencode walk of a .torrent: returns the info file paths in metainfo order. */
+    private fun parseTorrentFileList(bytes: ByteArray): List<String>? {
+        return try {
+            val root = BencodeReader(bytes).readValue() as? Map<*, *> ?: return null
+            val info = root["info"] as? Map<*, *> ?: return null
+            val files = info["files"] as? List<*>
+            if (files != null) {
+                files.map { entry ->
+                    val parts = (entry as? Map<*, *>)?.get("path") as? List<*>
+                    parts?.joinToString("/") { part ->
+                        (part as? ByteArray)?.toString(Charsets.UTF_8) ?: ""
+                    } ?: ""
+                }
+            } else {
+                val singleName = (info["name"] as? ByteArray)
+                    ?.toString(Charsets.UTF_8) ?: return null
+                listOf(singleName)
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private class BencodeReader(private val bytes: ByteArray) {
+        private var pos = 0
+
+        fun readValue(): Any? {
+            if (pos >= bytes.size) return null
+            return when (bytes[pos].toInt().toChar()) {
+                'i' -> {
+                    val end = indexOf('e')
+                    val value = String(bytes, pos + 1, end - pos - 1, Charsets.US_ASCII)
+                        .toLongOrNull() ?: 0L
+                    pos = end + 1
+                    value
+                }
+                'l' -> {
+                    pos++
+                    val list = mutableListOf<Any?>()
+                    while (pos < bytes.size && bytes[pos].toInt().toChar() != 'e') {
+                        list.add(readValue())
+                    }
+                    pos++
+                    list
+                }
+                'd' -> {
+                    pos++
+                    val map = LinkedHashMap<String, Any?>()
+                    while (pos < bytes.size && bytes[pos].toInt().toChar() != 'e') {
+                        val key = (readValue() as? ByteArray)
+                            ?.toString(Charsets.UTF_8) ?: break
+                        map[key] = readValue()
+                    }
+                    pos++
+                    map
+                }
+                else -> {
+                    val colon = indexOf(':')
+                    val length = String(bytes, pos, colon - pos, Charsets.US_ASCII)
+                        .toIntOrNull() ?: 0
+                    val start = colon + 1
+                    val end = minOf(start + length, bytes.size)
+                    pos = end
+                    bytes.copyOfRange(start, end)
+                }
+            }
+        }
+
+        private fun indexOf(c: Char): Int {
+            var i = pos
+            while (i < bytes.size && bytes[i].toInt().toChar() != c) i++
+            return i
+        }
+    }
+
+    /**
+     * Index of the episode's own file inside a batch torrent. The index
+     * counts EVERY entry of the file list (.pad fillers included) —
+     * that is the numbering CloudStream's TorrServer uses. Returns null
+     * when no video file name carries the episode number.
+     */
+    private fun episodeFileIndex(files: List<String>, episode: Int): Int? {
+        val patterns = listOf(
+            Regex("""S\d{1,2}E0*${episode}(?!\d)""", RegexOption.IGNORE_CASE),
+            Regex("""\bEP\s*\(?\s*0*${episode}\s*\)?(?!\d)""", RegexOption.IGNORE_CASE),
+            Regex("""\bEpisode\s*0*${episode}(?!\d)""", RegexOption.IGNORE_CASE)
+        )
+        val videoFiles = files.withIndex().filter { (_, path) ->
+            !path.contains(".pad") &&
+                Regex("""\.(mkv|mp4|avi|m4v|ts)$""", RegexOption.IGNORE_CASE)
+                    .containsMatchIn(path)
+        }
+        for (pattern in patterns) {
+            videoFiles.firstOrNull { (_, path) -> pattern.containsMatchIn(path) }
+                ?.let { return it.index }
+        }
+        return null
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val links: List<OneTamilMVLink> = try {
-            parseJson(data)
-        } catch (e: Exception) {
-            emptyList()
+        // v6 payloads are {"ep": n, "links": [...]} objects; movies and
+        // pre-v6 payloads are the bare link list. Both are accepted.
+        val trimmed = data.trim()
+        val episodeNumber: Int?
+        val links: List<OneTamilMVLink>
+        if (trimmed.startsWith("{")) {
+            val wrapper = try {
+                parseJson<EpisodeLinkData>(trimmed)
+            } catch (e: Exception) {
+                null
+            }
+            episodeNumber = wrapper?.ep
+            links = wrapper?.links ?: emptyList()
+        } else {
+            episodeNumber = null
+            links = try {
+                parseJson(data)
+            } catch (e: Exception) {
+                emptyList()
+            }
+        }
+
+        // v6: work out the torrent file index for the tapped episode,
+        // per quality, from the batch's own .torrent files. Magnets are
+        // paired with the same-quality torrent of the batch. Anything
+        // that cannot be resolved keeps its plain URL (old behaviour).
+        val indexedUrls = HashMap<String, String>()
+        if (episodeNumber != null) {
+            val indexByQuality = HashMap<Int, Int>()
+            links.filter { isTorrentFileLink(it.url) }.forEach { torrentLink ->
+                val files = torrentFileList(torrentLink.url) ?: return@forEach
+                val index = episodeFileIndex(files, episodeNumber) ?: return@forEach
+                indexedUrls[torrentLink.url] = appendIndexParam(torrentLink.url, index)
+                indexByQuality.putIfAbsent(parseQuality(torrentLink.label), index)
+            }
+            links.filter { it.url.startsWith("magnet:") }.forEach { magnetLink ->
+                val index = indexByQuality[parseQuality(magnetLink.label)]
+                    ?: return@forEach
+                indexedUrls[magnetLink.url] = appendIndexParam(magnetLink.url, index)
+            }
         }
 
         var found = false
@@ -952,7 +1153,11 @@ class TMLProvider : MainAPI() {
                 }
                 link.url.startsWith("magnet:") -> {
                     callback.invoke(
-                        newExtractorLink(name, "Magnet — ${link.label}", link.url, ExtractorLinkType.MAGNET) {
+                        newExtractorLink(
+                            name, "Magnet — ${link.label}",
+                            indexedUrls[link.url] ?: link.url,
+                            ExtractorLinkType.MAGNET
+                        ) {
                             this.quality = quality
                         }
                     )
@@ -961,7 +1166,11 @@ class TMLProvider : MainAPI() {
                 link.url.endsWith(".torrent") || link.url.contains("/attachments/") ||
                     link.url.contains("attachment.php") -> {
                     callback.invoke(
-                        newExtractorLink(name, "Torrent — ${link.label}", link.url, ExtractorLinkType.TORRENT) {
+                        newExtractorLink(
+                            name, "Torrent — ${link.label}",
+                            indexedUrls[link.url] ?: link.url,
+                            ExtractorLinkType.TORRENT
+                        ) {
                             this.quality = quality
                             this.referer = mainUrl
                         }
