@@ -441,6 +441,148 @@ class OTMProvider : MainAPI() {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Rich details via Cinemeta (2026-10-30).
+    //
+    // Karthi asked for TMDB-grade detail pages. TMDB's own API
+    // answers 401 without a personal key, and a key would have to
+    // live inside this public plugin — so the details come from
+    // Cinemeta instead: the free, keyless metadata service (records
+    // keyed by IMDb id, carrying poster, backdrop, logo, IMDb
+    // rating, runtime, genres, cast and a YouTube trailer). It
+    // replaces Wikipedia as the first plot source; Wikipedia and
+    // then the post text remain the fallbacks.
+    //
+    // Matching stays strict, like the Wikipedia flow, with two
+    // extra guards learned in simulation: the record's own name
+    // must equal the cleaned title (catalogue names can be aliases
+    // of a differently-titled film), and when several records
+    // verify ("Leo" 2023 is both the Tamil film and an animated
+    // film) only an India-country record is trusted — this forum
+    // posts Indian releases; a lone verified record is used as-is
+    // so the Hollywood/English sections still enrich.
+    // ------------------------------------------------------------------
+
+    private data class CinemetaSearch(
+        @JsonProperty("metas") val metas: List<CinemetaSearchItem>?
+    )
+
+    private data class CinemetaSearchItem(
+        @JsonProperty("name") val name: String?,
+        @JsonProperty("releaseInfo") val releaseInfo: String?,
+        @JsonProperty("imdb_id") val imdbId: String?
+    )
+
+    private data class CinemetaMetaResponse(
+        @JsonProperty("meta") val meta: CinemetaMeta?
+    )
+
+    private data class CinemetaMeta(
+        @JsonProperty("name") val name: String?,
+        @JsonProperty("description") val description: String?,
+        @JsonProperty("poster") val poster: String?,
+        @JsonProperty("background") val background: String?,
+        @JsonProperty("logo") val logo: String?,
+        @JsonProperty("imdbRating") val imdbRating: String?,
+        @JsonProperty("runtime") val runtime: String?,
+        @JsonProperty("genre") val genre: List<String>?,
+        @JsonProperty("cast") val cast: List<String>?,
+        @JsonProperty("country") val country: String?,
+        @JsonProperty("released") val released: String?,
+        @JsonProperty("trailers") val trailers: List<CinemetaTrailer>?
+    )
+
+    private data class CinemetaTrailer(
+        @JsonProperty("source") val source: String?
+    )
+
+    private data class RichDetails(
+        val plot: String?,
+        val poster: String?,
+        val background: String?,
+        val logo: String?,
+        val rating: Double?,
+        val durationMinutes: Int?,
+        val genres: List<String>,
+        val cast: List<String>,
+        val trailerUrl: String?,
+        val year: Int?
+    )
+
+    // Session cache: reopening a title must not refetch its details.
+    private val richCache =
+        java.util.concurrent.ConcurrentHashMap<String, RichDetails>()
+
+    private suspend fun fetchRichDetails(title: String, series: Boolean): RichDetails? {
+        val (name, year) = cleanMovieTitle(title)
+        if (name.length < 2) return null
+        val cacheKey = (if (series) "series|" else "movie|") +
+            normWikiTitle(name) + "|" + (year ?: "")
+        richCache[cacheKey]?.let { return it }
+        val details = try {
+            kotlinx.coroutines.withTimeoutOrNull(10_000L) {
+                fetchRichDetailsInner(name, year, series)
+            }
+        } catch (e: Exception) {
+            null
+        }
+        if (details != null) richCache[cacheKey] = details
+        return details
+    }
+
+    private suspend fun fetchRichDetailsInner(
+        name: String, year: String?, series: Boolean
+    ): RichDetails? {
+        val type = if (series) "series" else "movie"
+        val query = URLEncoder.encode(name, "UTF-8").replace("+", "%20")
+        val search: CinemetaSearch = parseJson(
+            app.get(
+                "https://v3-cinemeta.strem.io/catalog/$type/top/search=$query.json"
+            ).text
+        )
+        val candidates = search.metas.orEmpty().filter { item ->
+            item.imdbId != null &&
+                normWikiTitle(item.name.orEmpty()) == normWikiTitle(name) &&
+                (year == null || item.releaseInfo?.contains(year) == true)
+        }.distinctBy { it.imdbId }.take(3)
+        if (candidates.isEmpty()) return null
+        val verified = mutableListOf<CinemetaMeta>()
+        for (cand in candidates) {
+            val meta = try {
+                parseJson<CinemetaMetaResponse>(
+                    app.get(
+                        "https://v3-cinemeta.strem.io/meta/$type/${cand.imdbId}.json"
+                    ).text
+                ).meta
+            } catch (e: Exception) {
+                null
+            } ?: continue
+            if (normWikiTitle(meta.name.orEmpty()) != normWikiTitle(name)) continue
+            val metaYear = Regex("(19|20)\\d{2}").find(meta.released.orEmpty())?.value
+            if (year != null && metaYear != null && metaYear != year) continue
+            verified.add(meta)
+        }
+        val pick = verified.firstOrNull {
+            it.country?.contains("India", ignoreCase = true) == true
+        } ?: verified.singleOrNull() ?: return null
+        return RichDetails(
+            plot = pick.description?.takeIf { it.isNotBlank() }?.take(2000),
+            poster = pick.poster?.takeIf { it.isNotBlank() },
+            background = pick.background?.takeIf { it.isNotBlank() },
+            logo = pick.logo?.takeIf { it.isNotBlank() },
+            rating = pick.imdbRating?.toDoubleOrNull()?.takeIf { it > 0.0 },
+            durationMinutes = Regex("""\d+""").find(pick.runtime.orEmpty())
+                ?.value?.toIntOrNull(),
+            genres = pick.genre.orEmpty(),
+            cast = pick.cast.orEmpty(),
+            trailerUrl = pick.trailers.orEmpty().firstOrNull {
+                !it.source.isNullOrBlank()
+            }?.let { "https://www.youtube.com/watch?v=${it.source}" },
+            year = Regex("(19|20)\\d{2}").find(pick.released.orEmpty())
+                ?.value?.toIntOrNull() ?: year?.toIntOrNull()
+        )
+    }
+
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
@@ -536,9 +678,14 @@ class OTMProvider : MainAPI() {
             document.selectFirst("meta[property=og:image]")?.attr("content")
         ) ?: post.posterFromPost()
 
-        val plot = fetchWikiSummary(title)
+        // Rich details first (plot, rating, cast, backdrop, trailer);
+        // Wikipedia stays as the plot fallback, then the post text.
+        val rich = fetchRichDetails(title, isSeriesTitle(title))
+        val plot = rich?.plot
+            ?: fetchWikiSummary(title)
             ?: post.text().take(2000).ifBlank { null }
-        val year = Regex("(19|20)\\d{2}").find(title)?.value?.toIntOrNull()
+        val year = rich?.year
+            ?: Regex("(19|20)\\d{2}").find(title)?.value?.toIntOrNull()
 
         // Collect every usable link from the first post.
         // Each quality block is: <.torrent filename link> <MAGNET button>
@@ -625,17 +772,39 @@ class OTMProvider : MainAPI() {
                 return newTvSeriesLoadResponse(
                     title, url, TvType.TvSeries, episodes
                 ) {
-                    this.posterUrl = poster
+                    this.posterUrl = rich?.poster ?: poster
+                    this.backgroundPosterUrl = rich?.background
+                    this.logoUrl = rich?.logo
                     this.plot = plot
                     this.year = year
+                    rich?.rating?.let { this.score = Score.from10(it) }
+                    rich?.durationMinutes?.let { this.duration = it }
+                    rich?.genres?.takeIf { it.isNotEmpty() }?.let { this.tags = it }
+                    rich?.cast?.takeIf { it.isNotEmpty() }?.let { cast ->
+                        this.actors = cast.take(15).map { ActorData(Actor(it)) }
+                    }
+                    rich?.trailerUrl?.let {
+                        this.trailers.add(TrailerData(it, null, false))
+                    }
                 }
             }
         }
 
         return newMovieLoadResponse(title, url, TvType.Movie, links.values.toList().toJson()) {
-            this.posterUrl = poster
+            this.posterUrl = rich?.poster ?: poster
+            this.backgroundPosterUrl = rich?.background
+            this.logoUrl = rich?.logo
             this.plot = plot
             this.year = year
+            rich?.rating?.let { this.score = Score.from10(it) }
+            rich?.durationMinutes?.let { this.duration = it }
+            rich?.genres?.takeIf { it.isNotEmpty() }?.let { this.tags = it }
+            rich?.cast?.takeIf { it.isNotEmpty() }?.let { cast ->
+                this.actors = cast.take(15).map { ActorData(Actor(it)) }
+            }
+            rich?.trailerUrl?.let {
+                this.trailers.add(TrailerData(it, null, false))
+            }
         }
     }
 
