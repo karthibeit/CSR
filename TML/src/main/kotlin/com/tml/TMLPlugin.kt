@@ -8,5 +8,8 @@ import com.lagradost.cloudstream3.plugins.Plugin
 class TMLPlugin : Plugin() {
     override fun load(context: Context) {
         registerMainAPI(TMLProvider())
+        // App-global "Play in Kodi" option for movie/episode links
+        // (CloudStream's built-in player list has no Kodi entry).
+        registerVideoClickAction(KodiAction())
     }
 }
