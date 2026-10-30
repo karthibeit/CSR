@@ -23,7 +23,7 @@ import com.lagradost.cloudstream3.utils.txt
  * How Kodi is launched: the standard Android player intent,
  * confirmed against Kodi's own forum — ACTION_VIEW aimed at
  * component org.xbmc.kodi/.Splash with data = the stream URL and
- * type "video/*" makes Kodi play the file. Kodi accepts no
+ * a video mime type makes Kodi play the file. Kodi accepts no
  * subtitle/header extras over this intent, so this action is
  * one-source (you pick the quality/link first, like VLC/MPV),
  * and it only offers itself for direct stream types — Kodi
