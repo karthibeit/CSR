@@ -15,8 +15,8 @@
         ],
         "version": 6,
         "internalName": "4KHUB",
-        "description": "4KHDHub \u2014 movies and web series in 4K/HD (HubCloud/HubDrive links): Hindi, English, Korean, OTT originals, anime and more",
-        "url": "https://raw.githubusercontent.com/karthibeit/CSR/builds/4KHUB.cs3",
+        "description": "4KHDHub — movies and web series in 4K/HD (HubCloud/HubDrive links): Hindi, English, Korean, OTT originals, anime and more",
+        "url": "https://cdn.jsdelivr.net/gh/karthibeit/CSR@baa517a5eaf32f34e433bdd226084a89e5133e5a/4KHUB.cs3",
         "name": "4KHUB"
     },
     {
@@ -35,8 +35,8 @@
         ],
         "version": 9,
         "internalName": "OTM",
-        "description": "1TamilMV forum \u2014 Tamil, Telugu, Malayalam, Kannada and Hindi releases (magnet/torrent + direct/file-host links)",
-        "url": "https://raw.githubusercontent.com/karthibeit/CSR/builds/OTM.cs3",
+        "description": "1TamilMV forum — Tamil, Telugu, Malayalam, Kannada and Hindi releases (magnet/torrent + direct/file-host links)",
+        "url": "https://cdn.jsdelivr.net/gh/karthibeit/CSR@baa517a5eaf32f34e433bdd226084a89e5133e5a/OTM.cs3",
         "name": "OTM"
     },
     {
@@ -55,8 +55,8 @@
         ],
         "version": 8,
         "internalName": "TML",
-        "description": "1TamilMV Tamil sub-forums as main sections \u2014 PreDVD, WEB-HD, HD-Rips, HDTV, Web Series and more (magnet/torrent + direct/file-host links)",
-        "url": "https://raw.githubusercontent.com/karthibeit/CSR/builds/TML.cs3",
+        "description": "1TamilMV Tamil sub-forums as main sections — PreDVD, WEB-HD, HD-Rips, HDTV, Web Series and more (magnet/torrent + direct/file-host links)",
+        "url": "https://cdn.jsdelivr.net/gh/karthibeit/CSR@baa517a5eaf32f34e433bdd226084a89e5133e5a/TML.cs3",
         "name": "TML"
     }
 ]
