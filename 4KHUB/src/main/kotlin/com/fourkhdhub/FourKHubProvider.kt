@@ -3,9 +3,16 @@ package com.fourkhdhub
 import com.fasterxml.jackson.annotation.JsonProperty
 import android.app.Activity
 import android.app.Dialog
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.view.KeyEvent
+import android.view.MotionEvent
+import android.view.View
 import android.webkit.CookieManager
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.lagradost.cloudstream3.*
@@ -79,6 +86,14 @@ import java.net.URLEncoder
  *    lets the user tap the Cloudflare checkbox; once cf_clearance
  *    exists, the dialog closes and the solved headers are cached
  *    per host and replayed as before.
+ *  - v6 (2026-10-31): TV remote support for that visible dialog.
+ *    On a TV there is no touchscreen and the D-pad cannot move
+ *    focus into the WebView checkbox (Karthi's photo, 2026-10-31:
+ *    the verify box shows on TV but the remote cannot select it),
+ *    so the dialog now draws an on-screen pointer over the
+ *    WebView: the remote's arrow keys move it and OK taps at the
+ *    pointer, sent into the WebView as touch events. Touch and
+ *    mouse input keep working as in v5.
  *  - Detail pages also embed a Videasy player iframe; its TMDB id is
  *    kept as a "Watch Online" link entry as a fallback.
  */
@@ -522,14 +537,81 @@ class FourKHubProvider : MainAPI() {
                 val wv = WebView(activity).apply {
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
+                    isFocusable = true
+                    isFocusableInTouchMode = true
+                }
+                // v6 TV remote pointer: an overlay ring the D-pad
+                // moves over the WebView, because a TV remote cannot
+                // move focus into the page's checkbox on its own.
+                var cursorX = -1f
+                var cursorY = -1f
+                val cursorPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+                val pointer = object : View(activity) {
+                    override fun onDraw(canvas: Canvas) {
+                        super.onDraw(canvas)
+                        if (cursorX < 0f || cursorY < 0f) return
+                        cursorPaint.style = Paint.Style.STROKE
+                        cursorPaint.strokeWidth = dp(3).toFloat()
+                        cursorPaint.color = Color.WHITE
+                        canvas.drawCircle(
+                            cursorX, cursorY, dp(14).toFloat(), cursorPaint
+                        )
+                        cursorPaint.style = Paint.Style.FILL
+                        cursorPaint.color = Color.rgb(255, 87, 34)
+                        canvas.drawCircle(
+                            cursorX, cursorY, dp(4).toFloat(), cursorPaint
+                        )
+                    }
+                }
+                pointer.isClickable = false
+                pointer.isFocusable = false
+                val stage = FrameLayout(activity)
+                stage.addView(
+                    wv,
+                    FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT
+                    )
+                )
+                stage.addView(
+                    pointer,
+                    FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT
+                    )
+                )
+                fun tapPointer() {
+                    if (cursorX < 0f) return
+                    val downTime = android.os.SystemClock.uptimeMillis()
+                    val down = MotionEvent.obtain(
+                        downTime, downTime, MotionEvent.ACTION_DOWN,
+                        cursorX, cursorY, 0
+                    )
+                    down.setSource(
+                        android.view.InputDevice.SOURCE_TOUCHSCREEN
+                    )
+                    wv.dispatchTouchEvent(down)
+                    val up = MotionEvent.obtain(
+                        downTime, downTime + 90, MotionEvent.ACTION_UP,
+                        cursorX, cursorY, 0
+                    )
+                    up.setSource(
+                        android.view.InputDevice.SOURCE_TOUCHSCREEN
+                    )
+                    wv.postDelayed({
+                        wv.dispatchTouchEvent(up)
+                        up.recycle()
+                    }, 90)
+                    down.recycle()
                 }
                 val status = TextView(activity).apply {
-                    text = "Widget loaded — solving…"
+                    text = "Loading… TV remote: arrow keys move the " +
+                        "pointer, OK taps. Touch and mouse also work."
                     setPadding(0, dp(12), 0, 0)
                 }
                 container.addView(title)
                 container.addView(
-                    wv,
+                    stage,
                     LinearLayout.LayoutParams(
                         LinearLayout.LayoutParams.MATCH_PARENT, dp(430)
                     )
@@ -539,15 +621,65 @@ class FourKHubProvider : MainAPI() {
                 d.setContentView(container)
                 d.setCancelable(true)
                 d.setOnCancelListener { cancelled.set(true) }
+                d.setOnKeyListener { _, keyCode, event ->
+                    val isMove = keyCode == KeyEvent.KEYCODE_DPAD_LEFT ||
+                        keyCode == KeyEvent.KEYCODE_DPAD_RIGHT ||
+                        keyCode == KeyEvent.KEYCODE_DPAD_UP ||
+                        keyCode == KeyEvent.KEYCODE_DPAD_DOWN
+                    val isTap = keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
+                        keyCode == KeyEvent.KEYCODE_ENTER ||
+                        keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER
+                    if (!isMove && !isTap) return@setOnKeyListener false
+                    if (event.action == KeyEvent.ACTION_DOWN) {
+                        if (cursorX < 0f && wv.width > 0) {
+                            cursorX = wv.width * 0.14f
+                            cursorY = wv.height * 0.58f
+                        }
+                        if (isMove && cursorX >= 0f) {
+                            val step = dp(14) +
+                                dp(8) * minOf(event.repeatCount, 5)
+                            when (keyCode) {
+                                KeyEvent.KEYCODE_DPAD_LEFT ->
+                                    cursorX = (cursorX - step)
+                                        .coerceAtLeast(0f)
+                                KeyEvent.KEYCODE_DPAD_RIGHT ->
+                                    cursorX = (cursorX + step)
+                                        .coerceAtMost(
+                                            wv.width.toFloat()
+                                        )
+                                KeyEvent.KEYCODE_DPAD_UP ->
+                                    cursorY = (cursorY - step)
+                                        .coerceAtLeast(0f)
+                                KeyEvent.KEYCODE_DPAD_DOWN ->
+                                    cursorY = (cursorY + step)
+                                        .coerceAtMost(
+                                            wv.height.toFloat()
+                                        )
+                            }
+                            pointer.invalidate()
+                        }
+                        if (isTap && event.repeatCount == 0) tapPointer()
+                    }
+                    true
+                }
                 wv.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView?, u: String?) {
                         status.text =
-                            "If a checkbox is shown above, tap \u201cVerify you are human\u201d."
+                            "Move the pointer onto \u201cVerify you are " +
+                                "human\u201d and press OK."
                     }
                 }
                 webViewUa = wv.settings.userAgentString
                 wv.loadUrl(url)
                 d.show()
+                wv.requestFocus()
+                wv.post {
+                    if (cursorX < 0f && wv.width > 0) {
+                        cursorX = wv.width * 0.14f
+                        cursorY = wv.height * 0.58f
+                        pointer.invalidate()
+                    }
+                }
                 d.window?.setLayout(
                     LinearLayout.LayoutParams.MATCH_PARENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT
