@@ -1,5 +1,5 @@
 // Use an integer for version numbers — bump it on every release.
-version = 5
+version = 6
 
 cloudstream {
     description = "4KHDHub — movies and web series in 4K/HD (HubCloud/HubDrive links): Hindi, English, Korean, OTT originals, anime and more"
