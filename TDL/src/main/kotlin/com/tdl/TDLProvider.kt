@@ -318,7 +318,7 @@ class TDLProvider : MainAPI() {
             )
         }
 
-        fun emitM3u8(linkName: String, linkUrl: String) {
+        suspend fun emitM3u8(linkName: String, linkUrl: String) {
             callback.invoke(
                 newExtractorLink(name, linkName, linkUrl, ExtractorLinkType.M3U8) {
                     this.referer = "$mainUrl/"
