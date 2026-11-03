@@ -47,10 +47,15 @@ class CringeGuideAction : OpenInAppAction(
         result: LinkLoadingResult,
         index: Int?
     ) {
-        val slug = try {
-            CringeGuide.findSlug(video.name.trim())
-        } catch (e: Exception) {
+        val title = video.name?.trim().orEmpty()
+        val slug = if (title.isBlank()) {
             null
+        } else {
+            try {
+                CringeGuide.findSlug(title)
+            } catch (e: Exception) {
+                null
+            }
         }
         intent.data = Uri.parse(
             slug?.let { CringeGuide.pageUrl(it) } ?: "https://cringemdb.com"
