@@ -890,6 +890,28 @@ class TMLProvider : MainAPI() {
         val year = rich?.year
             ?: Regex("(19|20)\\d{2}").find(title)?.value?.toIntOrNull()
 
+        // Parents Guide (v9, Karthi's request — same feature as
+        // 4KHUB): for movies, prepend the CringeMDB block to the
+        // plot. Series keep their plot unchanged (CringeMDB is a
+        // movie database). Failures and no-match titles simply
+        // show no block.
+        val guideBlock = if (!isSeriesTitle(title)) {
+            try {
+                kotlinx.coroutines.withTimeoutOrNull(30_000L) {
+                    CringeGuide.guideFor(title, year)?.block
+                }
+            } catch (e: Exception) {
+                null
+            }
+        } else {
+            null
+        }
+        val finalPlot = when {
+            guideBlock == null -> plot
+            plot == null -> guideBlock
+            else -> guideBlock + "\n\n" + plot
+        }
+
         // Collect every usable link from the first post.
         // Each quality block is: <.torrent filename link> <MAGNET button>
         // <DIRECT LINK button>. The filename text is remembered so the
@@ -1027,7 +1049,7 @@ class TMLProvider : MainAPI() {
             this.posterUrl = rich?.poster ?: poster
             this.backgroundPosterUrl = rich?.background
             this.logoUrl = rich?.logo
-            this.plot = plot
+            this.plot = finalPlot
             this.year = year
             rich?.rating?.let { this.score = Score.from10(it) }
             rich?.durationMinutes?.let { this.duration = it }
