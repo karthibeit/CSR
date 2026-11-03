@@ -1,10 +1,8 @@
-[
-  {
-    "name": "CloudStream Tamil Repo",
-    "description": "Karthi's Tamil CloudStream plugins: 1TamilMV (OTM), TML, 4KHUB, TamilDhool (TDL), TamilGun (TGN)",
-    "manifestVersion": 1,
-    "pluginLists": [
-      "https://cdn.jsdelivr.net/gh/karthibeit/CSR@04b46d131daec490f4cf2f82d2c2174bc58364b5/plugins.json"
-    ]
-  }
-]
+{
+  "name": "CloudStream Tamil Repo",
+  "description": "Karthi's Tamil CloudStream plugins: 1TamilMV (OTM), TML, 4KHUB, TamilDhool (TDL), TamilGun (TGN)",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://cdn.jsdelivr.net/gh/karthibeit/CSR@04b46d131daec490f4cf2f82d2c2174bc58364b5/plugins.json"
+  ]
+}
