@@ -24,8 +24,15 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
+import java.net.InetAddress
 import java.net.URLEncoder
+import java.net.UnknownHostException
+import java.util.concurrent.TimeUnit
+import okhttp3.Dns
+import okhttp3.OkHttpClient
+import okhttp3.Request
 
 /**
  * 4KHUB — CloudStream provider for 4KHDHub (https://4khdhub.one).
@@ -183,10 +190,13 @@ class FourKHubProvider : MainAPI() {
         @JsonProperty("ref") val ref: String = ""
     )
 
-    // (v9 diagnostic build: the CringeMDB search JSON is read with a
-    // regex instead of Jackson, and every lookup outcome — including
-    // the failing stage — is surfaced in the plot as a PG-DIAG line
-    // until the in-app failure is identified.)
+    // (v10: the v9 diagnostic build proved on-device that the
+    // phone's DNS cannot resolve cringemdb.com at all —
+    // UnknownHostException before any request is sent — most likely
+    // a DNS-level filter on the home network. The guide is therefore
+    // fetched with a dedicated HTTP client whose resolver falls back
+    // to DNS-over-HTTPS at 1.1.1.1, then 8.8.8.8, both reached by IP
+    // literal so no local DNS is involved.)
 
     // Parents Guide (v7): scene-by-scene sex/nudity warnings from
     // CringeMDB, a keyless community database. Its search endpoint
@@ -207,69 +217,96 @@ class FourKHubProvider : MainAPI() {
         t.lowercase().replace(Regex("[^a-z0-9 ]"), "")
             .replace(Regex("\\s+"), " ").trim()
 
-    private val pgHeaders = mapOf(
-        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-            "AppleWebKit/537.36 (KHTML, like Gecko) " +
-            "Chrome/126.0.0.0 Safari/537.36"
-    )
+    private val pgUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+        "AppleWebKit/537.36 (KHTML, like Gecko) " +
+        "Chrome/126.0.0.0 Safari/537.36"
 
-    private fun pgDiag(stage: String, info: String): String =
-        "PG-DIAG stage=$stage $info"
+    // Plain client used only to reach the DoH resolvers by IP.
+    private val pgDohClient = OkHttpClient()
+
+    private fun dohResolve(hostname: String): List<InetAddress> {
+        val endpoints = listOf(
+            "https://1.1.1.1/dns-query?name=$hostname&type=A",
+            "https://8.8.8.8/resolve?name=$hostname&type=A"
+        )
+        for (url in endpoints) {
+            try {
+                val req = Request.Builder().url(url)
+                    .header("accept", "application/dns-json").build()
+                val text = pgDohClient.newCall(req).execute()
+                    .use { it.body?.string() }
+                val ips = Regex(""""data"\s*:\s*"(\d+\.\d+\.\d+\.\d+)"""")
+                    .findAll(text ?: "").map {
+                        InetAddress.getByName(it.groupValues[1])
+                    }.toList()
+                if (ips.isNotEmpty()) return ips
+            } catch (e: Exception) {
+                // Fall through to the next resolver.
+            }
+        }
+        throw UnknownHostException(hostname)
+    }
+
+    // System DNS first; DNS-over-HTTPS when the system resolver
+    // cannot resolve the host (the on-device cringemdb.com case).
+    private val pgDns = object : Dns {
+        override fun lookup(hostname: String): List<InetAddress> {
+            return try {
+                InetAddress.getAllByName(hostname).toList()
+            } catch (e: Exception) {
+                dohResolve(hostname)
+            }
+        }
+    }
+
+    private val pgClient by lazy {
+        OkHttpClient.Builder()
+            .dns(pgDns)
+            .connectTimeout(12, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .build()
+    }
+
+    private fun pgGet(url: String): String {
+        val req = Request.Builder().url(url)
+            .header("User-Agent", pgUserAgent).build()
+        return pgClient.newCall(req).execute().use { resp ->
+            resp.body?.string()
+                ?: throw IllegalStateException("Empty body for $url")
+        }
+    }
 
     private suspend fun fetchParentsGuide(title: String, year: Int?): String? {
         val key = "$title|$year"
-        parentsGuideCache[key]?.let { return it.ifBlank { null } }
+        parentsGuideCache[key]?.let { return it }
         val block = try {
-            kotlinx.coroutines.withTimeoutOrNull(25_000L) {
+            kotlinx.coroutines.withTimeoutOrNull(30_000L) {
                 lookupParentsGuide(title, year)
-            } ?: pgDiag("timeout", "title=$title year=$year")
+            }
         } catch (e: Exception) {
-            pgDiag(
-                "outer-error",
-                "ex=${e.javaClass.simpleName}: ${e.message?.take(90)}"
-            )
-        }
-        // Only genuine guide blocks are cached in this diagnostic
-        // build; diagnostics re-run on every open.
-        if (!block.startsWith("PG-DIAG")) {
-            parentsGuideCache[key] = block
-        }
+            null
+        } ?: return null // failure or no entry — not cached
+        parentsGuideCache[key] = block
         return block
     }
 
     private fun unescapeJsonString(s: String): String =
         s.replace("\\/", "/").replace("\\\"", "\"").replace("\\\\", "\\")
 
-    private suspend fun lookupParentsGuide(title: String, year: Int?): String {
-        // Stage 1: search.
-        val searchResp = try {
-            app.get(
-                "https://cringemdb.com/search?term=" +
-                    URLEncoder.encode(title, "UTF-8"),
-                headers = pgHeaders
-            )
-        } catch (e: Exception) {
-            return pgDiag(
-                "search-error",
-                "ex=${e.javaClass.simpleName}: ${e.message?.take(90)}"
-            )
-        }
-        val searchText = searchResp.text
-        // Stage 2: extract (movie, slug) pairs with a regex.
+    private suspend fun lookupParentsGuide(title: String, year: Int?): String? {
+        val searchText = pgGet(
+            "https://cringemdb.com/search?term=" +
+                URLEncoder.encode(title, "UTF-8")
+        )
+        // Extract (movie, slug) pairs from the search JSON.
         val pairRegex = Regex(
             """"movie"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"slug"\s*:\s*"([^"]+)""""
         )
         val rawPairs = pairRegex.findAll(searchText).map {
             unescapeJsonString(it.groupValues[1]) to it.groupValues[2]
         }.toList()
-        if (rawPairs.isEmpty()) {
-            return pgDiag(
-                "extract",
-                "code=${searchResp.code} len=${searchText.length} " +
-                    "head=${searchText.replace(Regex("\\s+"), " ").take(70)}"
-            )
-        }
-        // Stage 3: match (exact year, else unique one-year-off).
+        if (rawPairs.isEmpty()) return null
+        // Match: exact year first, else a unique one-year-off entry.
         val cleaned = cleanMatchTitle(title)
         val candidates = rawPairs.mapNotNull { (movie, slug) ->
             val m = Regex("""^(.*?)\s*\((\d{4})""").find(movie)
@@ -290,30 +327,13 @@ class FourKHubProvider : MainAPI() {
             }.map { it.third }.filter { it.isNotBlank() }.distinct()
             if (near.size == 1) slug = near[0]
         }
-        val useSlug = slug?.takeIf { it.isNotBlank() } ?: return pgDiag(
-            "match",
-            "title=$title year=$year cleaned=$cleaned " +
-                "cands=${candidates.joinToString(";") { "${it.first}|${it.second}|${it.third}" }.take(140)}"
-        )
-        // Stage 4: movie page.
-        val pageResp = try {
-            app.get("https://cringemdb.com/movie/$useSlug", headers = pgHeaders)
-        } catch (e: Exception) {
-            return pgDiag(
-                "page-error",
-                "slug=$useSlug ex=${e.javaClass.simpleName}: ${e.message?.take(90)}"
-            )
-        }
-        val doc = pageResp.document
+        val useSlug = slug?.takeIf { it.isNotBlank() } ?: return null
+        val doc = Jsoup.parse(pgGet("https://cringemdb.com/movie/$useSlug"))
         val verdictText = doc.selectFirst("p.help-us")?.text().orEmpty()
         val notSafe = verdictText.contains("NOT SAFE")
         val scenes = doc.select("article.sg-scene")
         if (!notSafe && scenes.isEmpty() && !verdictText.contains("SAFE")) {
-            return pgDiag(
-                "page",
-                "slug=$useSlug code=${pageResp.code} " +
-                    "verdict=${verdictText.take(40)} scenes=${scenes.size}"
-            )
+            return null
         }
         val sb = StringBuilder()
         if (notSafe) {
