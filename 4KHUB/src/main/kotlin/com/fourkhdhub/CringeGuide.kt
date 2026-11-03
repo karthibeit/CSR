@@ -46,7 +46,10 @@ object CringeGuide {
         "Chrome/126.0.0.0 Safari/537.36"
 
     private val blockCache = mutableMapOf<String, Guide>()
-    private val slugByTitle = mutableMapOf<String, String>()
+    // cleaned title -> (year -> slug). Keyed by year too so two
+    // movies sharing a title (remakes) never overwrite each other.
+    private val slugsByTitle =
+        mutableMapOf<String, MutableMap<Int?, String>>()
 
     // ------------------------------------------------------------ HTTP
 
@@ -125,7 +128,11 @@ object CringeGuide {
         s.replace("\\/", "/").replace("\\\"", "\"").replace("\\\\", "\\")
 
     /** The CringeMDB slug for a title, or null. Throws on network failure. */
-    private fun matchSlug(title: String, year: Int?): String? {
+    private fun matchSlug(
+        title: String,
+        year: Int?,
+        requireUnique: Boolean = false
+    ): String? {
         val searchText = get(
             "https://cringemdb.com/search?term=" +
                 URLEncoder.encode(title, "UTF-8")
@@ -144,9 +151,17 @@ object CringeGuide {
             Triple(cleanTitle(m.groupValues[1]),
                 m.groupValues[2].toIntOrNull(), slug)
         }
-        var slug = candidates.firstOrNull {
+        val exact = candidates.filter {
             it.first == cleaned && (year == null || it.second == year)
-        }?.third
+        }
+        // With an unknown year, several same-title movies are
+        // ambiguous: the caller may prefer no answer to a guess.
+        if (requireUnique && year == null &&
+            exact.map { it.third }.distinct().size > 1
+        ) {
+            return null
+        }
+        var slug = exact.firstOrNull()?.third
         if (slug == null && year != null) {
             // Festival-year vs release-year dating often differs
             // by one; accept a one-year-off candidate only when
@@ -214,20 +229,52 @@ object CringeGuide {
             return null // network failure — not cached
         }
         blockCache[key] = guide
-        slugByTitle[cleanTitle(title)] = guide.slug
+        slugsByTitle.getOrPut(cleanTitle(title)) { mutableMapOf() }[year] =
+            guide.slug
         return guide
     }
 
-    /** Just the slug for a title (used by the browser action). */
-    fun findSlug(title: String): String? {
+    /** Splits a trailing "(2016)" off a title: "Deadpool (2016)" -> ("Deadpool", 2016). */
+    private fun splitYear(title: String): Pair<String, Int?> {
+        val m = Regex("""^(.*?)\s*\((19\d{2}|20\d{2})\)\s*$""")
+            .find(title.trim()) ?: return title.trim() to null
+        return m.groupValues[1].trim() to m.groupValues[2].toInt()
+    }
+
+    /**
+     * Just the slug for a title (used by the browser action).
+     *
+     * The year (passed, or parsed from a "Title (2016)" suffix)
+     * is used when known, with the same one-year tolerance as the
+     * plot guide. Slugs already resolved by [guideFor] are reused.
+     * With no year, a title shared by several CringeMDB movies is
+     * ambiguous and yields null (the caller opens the home page)
+     * rather than a possibly wrong movie.
+     */
+    fun findSlug(rawTitle: String, rawYear: Int? = null): String? {
+        val (title, parsedYear) = splitYear(rawTitle)
+        val year = rawYear ?: parsedYear
+        if (title.isBlank()) return null
         val cleaned = cleanTitle(title)
-        slugByTitle[cleaned]?.let { return it }
+        val known = slugsByTitle[cleaned]
+        if (known != null) {
+            if (year != null) {
+                known[year]?.let { return it }
+                val near = known.filterKeys {
+                    it != null && kotlin.math.abs(it - year) == 1
+                }.values.distinct()
+                if (near.size == 1) return near[0]
+            } else {
+                val all = known.values.distinct()
+                if (all.size == 1) return all[0]
+            }
+        }
         val slug = try {
-            matchSlug(title, null)
+            matchSlug(title, year, requireUnique = true)
         } catch (e: Exception) {
             null
         } ?: return null
-        slugByTitle[cleaned] = slug
+        slugsByTitle.getOrPut(cleaned) { mutableMapOf() }[year] = slug
         return slug
     }
 

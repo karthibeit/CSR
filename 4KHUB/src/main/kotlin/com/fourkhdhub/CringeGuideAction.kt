@@ -20,8 +20,10 @@ import com.lagradost.cloudstream3.utils.txt
  * player's link menu (next to "Play in Kodi" from TML) for every
  * provider's links, and opens the movie's CringeMDB page in
  * Chrome, looked up from the tapped item's title via the same
- * strict matching as the in-plot guide. When no page matches,
- * it opens the CringeMDB home page instead.
+ * strict matching as the in-plot guide (year-aware: slugs the
+ * plot guide already matched are reused, and a title shared by
+ * several movies with no known year is treated as ambiguous).
+ * When no page matches, it opens the CringeMDB home page.
  *
  * Like KodiAction it is app-global and only shows when Chrome
  * is installed (standard on the phone; Android TV may not have
@@ -47,7 +49,13 @@ class CringeGuideAction : OpenInAppAction(
         result: LinkLoadingResult,
         index: Int?
     ) {
-        val title = video.name?.trim().orEmpty()
+        // headerName is the movie's title; name can be an episode or
+        // link label. findSlug also reuses slugs (year-matched) that
+        // the plot guide already resolved, and parses a "(2016)"
+        // suffix, so same-title remakes open the right page.
+        val title = video.headerName.trim().ifBlank {
+            video.name?.trim().orEmpty()
+        }
         val slug = if (title.isBlank()) {
             null
         } else {
