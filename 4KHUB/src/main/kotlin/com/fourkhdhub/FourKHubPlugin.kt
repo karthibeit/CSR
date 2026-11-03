@@ -8,5 +8,9 @@ import com.lagradost.cloudstream3.plugins.Plugin
 class FourKHubPlugin : Plugin() {
     override fun load(context: Context) {
         registerMainAPI(FourKHubProvider())
+        // App-global "CringeMDB Guide" option in the player's link
+        // menu: opens the movie's CringeMDB page in Chrome (the
+        // in-plot link is plain text and cannot be tapped).
+        registerVideoClickAction(CringeGuideAction())
     }
 }
