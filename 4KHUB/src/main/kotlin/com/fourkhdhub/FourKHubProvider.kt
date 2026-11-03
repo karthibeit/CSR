@@ -429,6 +429,10 @@ class FourKHubProvider : MainAPI() {
             if (intensity.isNotBlank()) sb.append(" (").append(intensity).append(")")
             if (desc.isNotBlank()) sb.append(" — ").append(desc)
         }
+        // Karthi (2026-11-03): a tappable link to the full CringeMDB
+        // page at the end of the block, for the complete details.
+        sb.append("\nFull details: https://cringemdb.com/movie/")
+            .append(useSlug)
         return sb.toString()
     }
 
