@@ -183,6 +183,101 @@ class FourKHubProvider : MainAPI() {
         @JsonProperty("ref") val ref: String = ""
     )
 
+    data class CringeSearchItem(
+        @JsonProperty("movie") val movie: String? = null,
+        @JsonProperty("slug") val slug: String? = null
+    )
+
+    // Parents Guide (v7): scene-by-scene sex/nudity warnings from
+    // CringeMDB, a keyless community database. Its search endpoint
+    // returns title candidates with page slugs; a movie page carries
+    // a SAFE / NOT SAFE verdict plus one card per flagged scene with
+    // start/end times, a category (Sex scene, Nudity, Suggestive,
+    // Sexual violence, Violence), an intensity and a short plain
+    // description. Matching is strict (cleaned title equal, year
+    // equal when known) — on any doubt nothing is shown, so a wrong
+    // movie's scenes are never attached. Results are cached for the
+    // session; a network failure is not cached. The guide is looked
+    // up for movies only. Verified live 2026-11-02 against
+    // Knock Knock (2015), Moana (2016) and Deadpool (2016).
+    private val parentsGuideCache = mutableMapOf<String, String>()
+
+    private fun cleanMatchTitle(t: String): String =
+        t.lowercase().replace(Regex("[^a-z0-9 ]"), "")
+            .replace(Regex("\\s+"), " ").trim()
+
+    private suspend fun fetchParentsGuide(title: String, year: Int?): String? {
+        val key = "$title|$year"
+        parentsGuideCache[key]?.let { return it.ifBlank { null } }
+        val block = try {
+            kotlinx.coroutines.withTimeoutOrNull(10_000L) {
+                lookupParentsGuide(title, year)
+            }
+        } catch (e: Exception) {
+            return null // network failure — do not cache it
+        }
+        parentsGuideCache[key] = block ?: ""
+        return block
+    }
+
+    private suspend fun lookupParentsGuide(title: String, year: Int?): String? {
+        val searchText = app.get(
+            "https://cringemdb.com/search?term=" +
+                URLEncoder.encode(title, "UTF-8")
+        ).text
+        val results = try {
+            parseJson<List<CringeSearchItem>>(searchText)
+        } catch (e: Exception) {
+            null
+        } ?: return null
+        val cleaned = cleanMatchTitle(title)
+        var slug: String? = null
+        for (item in results) {
+            val m = Regex("""^(.*?)\s*\((\d{4})""")
+                .find(item.movie ?: continue) ?: continue
+            val candidateYear = m.groupValues[2].toIntOrNull()
+            if (cleanMatchTitle(m.groupValues[1]) == cleaned &&
+                (year == null || candidateYear == year)
+            ) {
+                slug = item.slug
+                break
+            }
+        }
+        val useSlug = slug?.takeIf { it.isNotBlank() } ?: return null
+        val doc = app.get("https://cringemdb.com/movie/$useSlug").document
+        val verdictText = doc.selectFirst("p.help-us")?.text().orEmpty()
+        val notSafe = verdictText.contains("NOT SAFE")
+        val scenes = doc.select("article.sg-scene")
+        if (!notSafe && scenes.isEmpty() && !verdictText.contains("SAFE")) {
+            return null
+        }
+        val sb = StringBuilder()
+        if (notSafe) {
+            sb.append("⚠ PARENTS GUIDE (CringeMDB) — NOT SAFE to watch with kids")
+        } else {
+            sb.append("✔ PARENTS GUIDE (CringeMDB) — No flagged scenes reported")
+        }
+        for (scene in scenes) {
+            val start = scene.selectFirst(".sg-time strong")?.text()?.trim().orEmpty()
+            val end = scene.selectFirst(".sg-time span")?.text()?.trim()
+                ?.removePrefix("to ")?.trim().orEmpty()
+            val h3 = scene.selectFirst(".sg-body h3")
+            val intensity = h3?.selectFirst("small")?.text()?.trim().orEmpty()
+            val category = h3?.ownText()?.trim().orEmpty()
+            val desc = scene.selectFirst(".sg-body p")?.text()?.trim().orEmpty()
+            val range = if (start.isNotBlank() && end.isNotBlank()) {
+                "$start–$end"
+            } else {
+                start
+            }
+            sb.append("\n• ").append(range)
+            if (category.isNotBlank()) sb.append(" · ").append(category)
+            if (intensity.isNotBlank()) sb.append(" (").append(intensity).append(")")
+            if (desc.isNotBlank()) sb.append(" — ").append(desc)
+        }
+        return sb.toString()
+    }
+
     /** Download buttons of one block (a .download-item or an episode item). */
     private fun org.jsoup.nodes.Element.downloadButtons(
         label: String,
@@ -264,10 +359,13 @@ class FourKHubProvider : MainAPI() {
             if (playerUrl != null) {
                 links += HubLink(playerUrl, "Watch Online — Videasy", url)
             }
+            val parentsGuide = fetchParentsGuide(title, year)
+            val fullPlot = listOfNotNull(parentsGuide, plot)
+                .joinToString("\n\n").ifBlank { null }
             return newMovieLoadResponse(title, url, TvType.Movie, links.toJson()) {
                 this.posterUrl = poster
                 this.year = year
-                this.plot = plot
+                this.plot = fullPlot
                 this.score = score
                 this.tags = tags
                 this.actors = actors
