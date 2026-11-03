@@ -195,8 +195,9 @@ class FourKHubProvider : MainAPI() {
     // start/end times, a category (Sex scene, Nudity, Suggestive,
     // Sexual violence, Violence), an intensity and a short plain
     // description. Matching is strict (cleaned title equal, year
-    // equal when known) — on any doubt nothing is shown, so a wrong
-    // movie's scenes are never attached. Results are cached for the
+    // equal when known; a one-year-off candidate is accepted only
+    // when it is the unique exact-title candidate) — on any doubt
+    // nothing is shown, so a wrong movie's scenes are never attached. Results are cached for the
     // session; a network failure is not cached. The guide is looked
     // up for movies only. Verified live 2026-11-02 against
     // Knock Knock (2015), Moana (2016) and Deadpool (2016).
@@ -231,17 +232,30 @@ class FourKHubProvider : MainAPI() {
             null
         } ?: return null
         val cleaned = cleanMatchTitle(title)
-        var slug: String? = null
-        for (item in results) {
+        // Candidates as (cleaned name, year, slug) triples.
+        val candidates = results.mapNotNull { item ->
             val m = Regex("""^(.*?)\s*\((\d{4})""")
-                .find(item.movie ?: continue) ?: continue
-            val candidateYear = m.groupValues[2].toIntOrNull()
-            if (cleanMatchTitle(m.groupValues[1]) == cleaned &&
-                (year == null || candidateYear == year)
-            ) {
-                slug = item.slug
-                break
-            }
+                .find(item.movie ?: return@mapNotNull null)
+                ?: return@mapNotNull null
+            Triple(
+                cleanMatchTitle(m.groupValues[1]),
+                m.groupValues[2].toIntOrNull(),
+                item.slug
+            )
+        }
+        var slug = candidates.firstOrNull {
+            it.first == cleaned && (year == null || it.second == year)
+        }?.third
+        if (slug == null && year != null) {
+            // Festival-year vs release-year dating often differs by
+            // one (Obsession: 2025 on the hub, 2026 on CringeMDB).
+            // Accept a one-year-off candidate only when it is the
+            // single exact-title candidate at that distance.
+            val near = candidates.filter {
+                it.first == cleaned && it.second != null &&
+                    kotlin.math.abs(it.second!! - year) == 1
+            }.mapNotNull { it.third }.filter { it.isNotBlank() }.distinct()
+            if (near.size == 1) slug = near[0]
         }
         val useSlug = slug?.takeIf { it.isNotBlank() } ?: return null
         val doc = app.get("https://cringemdb.com/movie/$useSlug").document
