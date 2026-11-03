@@ -190,13 +190,14 @@ class FourKHubProvider : MainAPI() {
         @JsonProperty("ref") val ref: String = ""
     )
 
-    // (v10: the v9 diagnostic build proved on-device that the
-    // phone's DNS cannot resolve cringemdb.com at all —
-    // UnknownHostException before any request is sent — most likely
-    // a DNS-level filter on the home network. The guide is therefore
-    // fetched with a dedicated HTTP client whose resolver falls back
-    // to DNS-over-HTTPS at 1.1.1.1, then 8.8.8.8, both reached by IP
-    // literal so no local DNS is involved.)
+    // (v10 added a dedicated client with a DNS-over-HTTPS fallback
+    // after the v9 diagnostic proved the phone's DNS cannot resolve
+    // cringemdb.com at all — UnknownHostException before any request
+    // is sent, most likely a DNS-level filter on the home network.
+    // v10 still showed nothing on-device, so v11 restores the
+    // PG-DIAG line with a per-step resolver trace, shortens the DoH
+    // timeouts, raises the lookup budget to 45s, and adds a final
+    // fallback to CringeMDB's Cloudflare anycast addresses.)
 
     // Parents Guide (v7): scene-by-scene sex/nudity warnings from
     // CringeMDB, a keyless community database. Its search endpoint
@@ -221,15 +222,34 @@ class FourKHubProvider : MainAPI() {
         "AppleWebKit/537.36 (KHTML, like Gecko) " +
         "Chrome/126.0.0.0 Safari/537.36"
 
-    // Plain client used only to reach the DoH resolvers by IP.
-    private val pgDohClient = OkHttpClient()
+    // v11 diagnostic trace: each resolver/fetch step appends a
+    // short token; the trace is shown in the plot as a PG-DIAG line
+    // whenever the guide cannot be produced.
+    private val pgTrace = StringBuilder()
+
+    private fun pgNote(token: String) {
+        synchronized(pgTrace) { pgTrace.append(token).append(' ') }
+    }
+
+    private fun pgDiag(stage: String, extra: String = ""): String {
+        val trace = synchronized(pgTrace) { pgTrace.toString().trim() }
+        return "PG-DIAG stage=$stage trace=[$trace] $extra".trim()
+    }
+
+    // Short-timeout client used only to reach the DoH resolvers by
+    // IP literal, so no local DNS is involved.
+    private val pgDohClient = OkHttpClient.Builder()
+        .connectTimeout(6, TimeUnit.SECONDS)
+        .readTimeout(8, TimeUnit.SECONDS)
+        .callTimeout(12, TimeUnit.SECONDS)
+        .build()
 
     private fun dohResolve(hostname: String): List<InetAddress> {
         val endpoints = listOf(
-            "https://1.1.1.1/dns-query?name=$hostname&type=A",
-            "https://8.8.8.8/resolve?name=$hostname&type=A"
+            "doh1" to "https://1.1.1.1/dns-query?name=$hostname&type=A",
+            "doh2" to "https://8.8.8.8/resolve?name=$hostname&type=A"
         )
-        for (url in endpoints) {
+        for ((tag, url) in endpoints) {
             try {
                 val req = Request.Builder().url(url)
                     .header("accept", "application/dns-json").build()
@@ -239,12 +259,22 @@ class FourKHubProvider : MainAPI() {
                     .findAll(text ?: "").map {
                         InetAddress.getByName(it.groupValues[1])
                     }.toList()
-                if (ips.isNotEmpty()) return ips
+                if (ips.isNotEmpty()) {
+                    pgNote("$tag:ok(${ips.size})")
+                    return ips
+                }
+                pgNote("$tag:empty")
             } catch (e: Exception) {
-                // Fall through to the next resolver.
+                pgNote("$tag:${e.javaClass.simpleName}")
             }
         }
-        throw UnknownHostException(hostname)
+        // Last resort: CringeMDB sits behind Cloudflare; these
+        // anycast addresses were its A records when checked from a
+        // working network. TLS still verifies the real hostname.
+        pgNote("hard:fallback")
+        return listOf("104.21.52.25", "172.67.194.80").map {
+            InetAddress.getByName(it)
+        }
     }
 
     // System DNS first; DNS-over-HTTPS when the system resolver
@@ -252,8 +282,11 @@ class FourKHubProvider : MainAPI() {
     private val pgDns = object : Dns {
         override fun lookup(hostname: String): List<InetAddress> {
             return try {
-                InetAddress.getAllByName(hostname).toList()
+                val found = InetAddress.getAllByName(hostname).toList()
+                pgNote("sys:ok")
+                found
             } catch (e: Exception) {
+                pgNote("sys:${e.javaClass.simpleName}")
                 dohResolve(hostname)
             }
         }
@@ -262,42 +295,59 @@ class FourKHubProvider : MainAPI() {
     private val pgClient by lazy {
         OkHttpClient.Builder()
             .dns(pgDns)
-            .connectTimeout(12, TimeUnit.SECONDS)
-            .readTimeout(15, TimeUnit.SECONDS)
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(12, TimeUnit.SECONDS)
             .build()
     }
 
-    private fun pgGet(url: String): String {
+    private fun pgGet(url: String, label: String): String {
         val req = Request.Builder().url(url)
             .header("User-Agent", pgUserAgent).build()
         return pgClient.newCall(req).execute().use { resp ->
-            resp.body?.string()
+            val body = resp.body?.string()
                 ?: throw IllegalStateException("Empty body for $url")
+            pgNote("$label:${resp.code}/${body.length}B")
+            body
         }
     }
 
     private suspend fun fetchParentsGuide(title: String, year: Int?): String? {
         val key = "$title|$year"
         parentsGuideCache[key]?.let { return it }
+        synchronized(pgTrace) { pgTrace.setLength(0) }
         val block = try {
-            kotlinx.coroutines.withTimeoutOrNull(30_000L) {
+            kotlinx.coroutines.withTimeoutOrNull(45_000L) {
                 lookupParentsGuide(title, year)
-            }
+            } ?: return pgDiag("timeout", "title=$title year=$year")
         } catch (e: Exception) {
-            null
-        } ?: return null // failure or no entry — not cached
-        parentsGuideCache[key] = block
+            return pgDiag(
+                "error",
+                "ex=${e.javaClass.simpleName}: ${e.message?.take(80)}"
+            )
+        }
+        // Only genuine guide blocks are cached; diagnostics re-run.
+        if (!block.startsWith("PG-DIAG")) {
+            parentsGuideCache[key] = block
+        }
         return block
     }
 
     private fun unescapeJsonString(s: String): String =
         s.replace("\\/", "/").replace("\\\"", "\"").replace("\\\\", "\\")
 
-    private suspend fun lookupParentsGuide(title: String, year: Int?): String? {
-        val searchText = pgGet(
-            "https://cringemdb.com/search?term=" +
-                URLEncoder.encode(title, "UTF-8")
-        )
+    private suspend fun lookupParentsGuide(title: String, year: Int?): String {
+        val searchText = try {
+            pgGet(
+                "https://cringemdb.com/search?term=" +
+                    URLEncoder.encode(title, "UTF-8"),
+                "search"
+            )
+        } catch (e: Exception) {
+            return pgDiag(
+                "search-error",
+                "ex=${e.javaClass.simpleName}: ${e.message?.take(80)}"
+            )
+        }
         // Extract (movie, slug) pairs from the search JSON.
         val pairRegex = Regex(
             """"movie"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"slug"\s*:\s*"([^"]+)""""
@@ -305,7 +355,12 @@ class FourKHubProvider : MainAPI() {
         val rawPairs = pairRegex.findAll(searchText).map {
             unescapeJsonString(it.groupValues[1]) to it.groupValues[2]
         }.toList()
-        if (rawPairs.isEmpty()) return null
+        if (rawPairs.isEmpty()) {
+            return pgDiag(
+                "extract",
+                "head=${searchText.replace(Regex("\\s+"), " ").take(70)}"
+            )
+        }
         // Match: exact year first, else a unique one-year-off entry.
         val cleaned = cleanMatchTitle(title)
         val candidates = rawPairs.mapNotNull { (movie, slug) ->
@@ -327,13 +382,28 @@ class FourKHubProvider : MainAPI() {
             }.map { it.third }.filter { it.isNotBlank() }.distinct()
             if (near.size == 1) slug = near[0]
         }
-        val useSlug = slug?.takeIf { it.isNotBlank() } ?: return null
-        val doc = Jsoup.parse(pgGet("https://cringemdb.com/movie/$useSlug"))
+        val useSlug = slug?.takeIf { it.isNotBlank() } ?: return pgDiag(
+            "match",
+            "title=$title year=$year cleaned=$cleaned " +
+                "cands=${candidates.joinToString(";") { "${it.first}|${it.second}|${it.third}" }.take(120)}"
+        )
+        val pageHtml = try {
+            pgGet("https://cringemdb.com/movie/$useSlug", "page")
+        } catch (e: Exception) {
+            return pgDiag(
+                "page-error",
+                "slug=$useSlug ex=${e.javaClass.simpleName}: ${e.message?.take(80)}"
+            )
+        }
+        val doc = Jsoup.parse(pageHtml)
         val verdictText = doc.selectFirst("p.help-us")?.text().orEmpty()
         val notSafe = verdictText.contains("NOT SAFE")
         val scenes = doc.select("article.sg-scene")
         if (!notSafe && scenes.isEmpty() && !verdictText.contains("SAFE")) {
-            return null
+            return pgDiag(
+                "page-parse",
+                "slug=$useSlug verdict=${verdictText.take(40)} scenes=${scenes.size}"
+            )
         }
         val sb = StringBuilder()
         if (notSafe) {
