@@ -183,10 +183,10 @@ class FourKHubProvider : MainAPI() {
         @JsonProperty("ref") val ref: String = ""
     )
 
-    data class CringeSearchItem(
-        @JsonProperty("movie") val movie: String? = null,
-        @JsonProperty("slug") val slug: String? = null
-    )
+    // (v9 diagnostic build: the CringeMDB search JSON is read with a
+    // regex instead of Jackson, and every lookup outcome — including
+    // the failing stage — is surfaced in the plot as a PG-DIAG line
+    // until the in-app failure is identified.)
 
     // Parents Guide (v7): scene-by-scene sex/nudity warnings from
     // CringeMDB, a keyless community database. Its search endpoint
@@ -207,63 +207,113 @@ class FourKHubProvider : MainAPI() {
         t.lowercase().replace(Regex("[^a-z0-9 ]"), "")
             .replace(Regex("\\s+"), " ").trim()
 
+    private val pgHeaders = mapOf(
+        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+            "AppleWebKit/537.36 (KHTML, like Gecko) " +
+            "Chrome/126.0.0.0 Safari/537.36"
+    )
+
+    private fun pgDiag(stage: String, info: String): String =
+        "PG-DIAG stage=$stage $info"
+
     private suspend fun fetchParentsGuide(title: String, year: Int?): String? {
         val key = "$title|$year"
         parentsGuideCache[key]?.let { return it.ifBlank { null } }
         val block = try {
-            kotlinx.coroutines.withTimeoutOrNull(10_000L) {
+            kotlinx.coroutines.withTimeoutOrNull(25_000L) {
                 lookupParentsGuide(title, year)
-            }
+            } ?: pgDiag("timeout", "title=$title year=$year")
         } catch (e: Exception) {
-            return null // network failure — do not cache it
+            pgDiag(
+                "outer-error",
+                "ex=${e.javaClass.simpleName}: ${e.message?.take(90)}"
+            )
         }
-        parentsGuideCache[key] = block ?: ""
+        // Only genuine guide blocks are cached in this diagnostic
+        // build; diagnostics re-run on every open.
+        if (!block.startsWith("PG-DIAG")) {
+            parentsGuideCache[key] = block
+        }
         return block
     }
 
-    private suspend fun lookupParentsGuide(title: String, year: Int?): String? {
-        val searchText = app.get(
-            "https://cringemdb.com/search?term=" +
-                URLEncoder.encode(title, "UTF-8")
-        ).text
-        val results = try {
-            parseJson<List<CringeSearchItem>>(searchText)
+    private fun unescapeJsonString(s: String): String =
+        s.replace("\\/", "/").replace("\\\"", "\"").replace("\\\\", "\\")
+
+    private suspend fun lookupParentsGuide(title: String, year: Int?): String {
+        // Stage 1: search.
+        val searchResp = try {
+            app.get(
+                "https://cringemdb.com/search?term=" +
+                    URLEncoder.encode(title, "UTF-8"),
+                headers = pgHeaders
+            )
         } catch (e: Exception) {
-            null
-        } ?: return null
+            return pgDiag(
+                "search-error",
+                "ex=${e.javaClass.simpleName}: ${e.message?.take(90)}"
+            )
+        }
+        val searchText = searchResp.text
+        // Stage 2: extract (movie, slug) pairs with a regex.
+        val pairRegex = Regex(
+            """"movie"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"slug"\s*:\s*"([^"]+)""""
+        )
+        val rawPairs = pairRegex.findAll(searchText).map {
+            unescapeJsonString(it.groupValues[1]) to it.groupValues[2]
+        }.toList()
+        if (rawPairs.isEmpty()) {
+            return pgDiag(
+                "extract",
+                "code=${searchResp.code} len=${searchText.length} " +
+                    "head=${searchText.replace(Regex("\\s+"), " ").take(70)}"
+            )
+        }
+        // Stage 3: match (exact year, else unique one-year-off).
         val cleaned = cleanMatchTitle(title)
-        // Candidates as (cleaned name, year, slug) triples.
-        val candidates = results.mapNotNull { item ->
-            val m = Regex("""^(.*?)\s*\((\d{4})""")
-                .find(item.movie ?: return@mapNotNull null)
+        val candidates = rawPairs.mapNotNull { (movie, slug) ->
+            val m = Regex("""^(.*?)\s*\((\d{4})""").find(movie)
                 ?: return@mapNotNull null
             Triple(
                 cleanMatchTitle(m.groupValues[1]),
                 m.groupValues[2].toIntOrNull(),
-                item.slug
+                slug
             )
         }
         var slug = candidates.firstOrNull {
             it.first == cleaned && (year == null || it.second == year)
         }?.third
         if (slug == null && year != null) {
-            // Festival-year vs release-year dating often differs by
-            // one (Obsession: 2025 on the hub, 2026 on CringeMDB).
-            // Accept a one-year-off candidate only when it is the
-            // single exact-title candidate at that distance.
             val near = candidates.filter {
                 it.first == cleaned && it.second != null &&
                     kotlin.math.abs(it.second!! - year) == 1
-            }.mapNotNull { it.third }.filter { it.isNotBlank() }.distinct()
+            }.map { it.third }.filter { it.isNotBlank() }.distinct()
             if (near.size == 1) slug = near[0]
         }
-        val useSlug = slug?.takeIf { it.isNotBlank() } ?: return null
-        val doc = app.get("https://cringemdb.com/movie/$useSlug").document
+        val useSlug = slug?.takeIf { it.isNotBlank() } ?: return pgDiag(
+            "match",
+            "title=$title year=$year cleaned=$cleaned " +
+                "cands=${candidates.joinToString(";") { "${it.first}|${it.second}|${it.third}" }.take(140)}"
+        )
+        // Stage 4: movie page.
+        val pageResp = try {
+            app.get("https://cringemdb.com/movie/$useSlug", headers = pgHeaders)
+        } catch (e: Exception) {
+            return pgDiag(
+                "page-error",
+                "slug=$useSlug ex=${e.javaClass.simpleName}: ${e.message?.take(90)}"
+            )
+        }
+        val doc = pageResp.document
         val verdictText = doc.selectFirst("p.help-us")?.text().orEmpty()
         val notSafe = verdictText.contains("NOT SAFE")
         val scenes = doc.select("article.sg-scene")
         if (!notSafe && scenes.isEmpty() && !verdictText.contains("SAFE")) {
-            return null
+            return pgDiag(
+                "page",
+                "slug=$useSlug code=${pageResp.code} " +
+                    "verdict=${verdictText.take(40)} scenes=${scenes.size}"
+            )
         }
         val sb = StringBuilder()
         if (notSafe) {
