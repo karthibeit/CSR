@@ -468,7 +468,7 @@ class FourKHubProvider : MainAPI() {
             ?: document.selectFirst("meta[property=og:title]")
                 ?.attr("content")?.substringBefore(" - 4K")?.trim()
             ?: throw ErrorLoadingException("No title found")
-        val titleYear = Regex("""\((19|20)\d{2}\)""").find(rawTitle)
+        val titleYear = Regex("""\(((?:19|20)\d{2})\)""").find(rawTitle)
         val year = titleYear?.groupValues?.get(1)?.toIntOrNull()
         val title = rawTitle.replace(Regex("""\s*\((?:19|20)\d{2}\)\s*$"""), "").trim()
 
