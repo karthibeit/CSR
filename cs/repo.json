@@ -1,6 +1,6 @@
 {
   "name": "CloudStream Tamil Repo",
-  "description": "Karthi's Tamil CloudStream plugins: 1TamilMV (OTM), TML, 4KHUB, TamilDhool (TDL), TamilGun (TGN)",
+  "description": "Karthi's Tamil CloudStream plugins: 1TamilMV (OTM), TML, 4KHUB, TamilDhool (TDL), TamilGun (TGN), CastleTV (CTV)",
   "manifestVersion": 1,
   "pluginLists": [
     "https://karthibeit.github.io/CSR/cs/plugins.json"
