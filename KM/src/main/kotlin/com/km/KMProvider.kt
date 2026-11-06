@@ -217,7 +217,7 @@ class KMProvider : MainAPI() {
     private val directFileRegex = Regex("""https?://[^\s"'<>]+\.(?:mkv|mp4)(?:\?[^\s"'<>]*)?""")
 
     /** Emit a direct Pixeldrain file link for one file id. */
-    private fun emitPixeldrain(
+    private suspend fun emitPixeldrain(
         job: DlJob,
         id: String,
         callback: (ExtractorLink) -> Unit
@@ -401,7 +401,7 @@ class KMProvider : MainAPI() {
     }
 
     /** Emit a direct-download endpoint (skydrop, transfer.it) as a link. */
-    private fun emitDirect(
+    private suspend fun emitDirect(
         job: DlJob,
         hostLabel: String,
         url: String,
