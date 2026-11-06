@@ -10,6 +10,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import org.jsoup.nodes.Document
+import java.net.HttpURLConnection
+import java.net.URL
 import java.net.URLEncoder
 
 /**
@@ -130,7 +132,7 @@ class KMProvider : MainAPI() {
             .replace(Regex("""\((?:19|20)\d{2}\)"""), "").trim()
             .replace(Regex("""\s+"""), " ")
             .ifBlank { doc.title() }
-        val poster = doc.select("img[src*=tmdb/poster]").firstOrNull()?.attr("src")
+        val poster = doc.select("img[src*=\"tmdb/poster\"]").firstOrNull()?.attr("src")
             ?.takeIf { it.isNotBlank() }
             ?: doc.selectFirst("meta[property=og:image]")?.attr("content")
         val backdrop = doc.selectFirst("meta[property=og:image]")?.attr("content")
@@ -175,12 +177,21 @@ class KMProvider : MainAPI() {
         val jobs = mutableListOf<DlJob>()
         for (btn in this.select(".downloads-section a.dl-btn[href]")) {
             val href = btn.attr("href").trim()
-            if (!href.contains("one.kmcloud.lol/s/")) continue
+            val isHub = href.contains("one.kmcloud.lol/s/")
+            val isMagic = href.contains("magiclinks.lol")
+            if (!isHub && !isMagic) continue
             val res = btn.selectFirst(".dl-res")?.text()?.trim().orEmpty()
             val qual = btn.selectFirst(".dl-quality")?.text()?.trim().orEmpty()
             val size = btn.selectFirst(".dl-size")?.text()?.trim().orEmpty()
             val resLabel = listOf(qual.ifBlank { res }, res)
                 .filter { it.isNotBlank() }.distinct().joinToString(" ")
+            // The WebDL category holds the original-quality files
+            // (including every 2160p) behind magiclinks buttons; mark
+            // those jobs so the user can tell them from encoded ones.
+            val category = btn.parents()
+                .firstOrNull { it.hasClass("download-category") }
+                ?.selectFirst(".category-title")?.text()?.trim().orEmpty()
+            val catLabel = if (category.contains("WebDL", true)) "WebDL" else ""
             // Context: season block title and tab kind (combined or zip),
             // when the button belongs to a series post.
             val season = btn.parents().firstOrNull { it.hasClass("season-block") }
@@ -192,7 +203,7 @@ class KMProvider : MainAPI() {
                 ?.substringBefore("-")?.replaceFirstChar { it.uppercase() }
                 ?.takeIf { it.equals("Combined", true) || it.equals("Zip", true) }
                 .orEmpty()
-            val label = listOf(season, kind, resLabel, size)
+            val label = listOf(catLabel, season, kind, resLabel, size)
                 .filter { it.isNotBlank() }.joinToString(" · ")
                 .ifBlank { "Download" }
             jobs.add(DlJob(label, href, qualityOf(resLabel)))
@@ -200,41 +211,91 @@ class KMProvider : MainAPI() {
         return jobs
     }
 
+    private val pixeldrainIdRegex = Regex("""pixeldrain\.com/u/([A-Za-z0-9]+)""")
+    private val gofileRegex = Regex("""gofile\.io/d/([A-Za-z0-9]+)""")
+    private val routeRegex = Regex("""one\.kmcloud\.lol/d/[A-Za-z0-9]+/[a-z]+""")
+    private val directFileRegex = Regex("""https?://[^\s"'<>]+\.(?:mkv|mp4)(?:\?[^\s"'<>]*)?""")
+
+    /** Emit a direct Pixeldrain file link for one file id. */
+    private fun emitPixeldrain(
+        job: DlJob,
+        id: String,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        callback.invoke(
+            newExtractorLink(
+                name,
+                job.label + " · Pixeldrain",
+                "https://pixeldrain.com/api/file/" + id,
+                ExtractorLinkType.VIDEO
+            ) {
+                this.referer = "$mainUrl/"
+                this.quality = job.quality
+            }
+        )
+    }
+
     /**
-     * Resolve one kmcloud hub page: pixeldrain becomes a direct file
-     * link, gofile goes through the built-in extractor. Returns true
-     * when at least one playable link was emitted.
+     * Resolve one kmcloud hub page. v1 relied on the hub page's
+     * anchors alone and produced "no link found" on-device, so v2
+     * casts a wider net: anchors first, then a regex scan of the raw
+     * page for host routes or direct host URLs, then the hub's
+     * mydirect route, whose page is scanned the same way. Pixeldrain
+     * becomes a direct file link; gofile goes through the built-in
+     * extractor. Returns true when at least one link was emitted.
      */
     private suspend fun resolveHub(
         job: DlJob,
+        postUrl: String,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var found = false
-        val doc = try {
-            app.get(job.url).document
+        val resp = try {
+            app.get(job.url, headers = mapOf("Referer" to postUrl))
         } catch (e: Exception) {
             return false
         }
-        val routes = doc.select("a[href*=/d/]").map { it.attr("href") }.distinct()
+        val html = resp.text
+        val routes = LinkedHashSet<String>()
+        for (a in resp.document.select("a[href]")) {
+            val href = a.attr("href").trim()
+            if (!href.contains("/d/")) continue
+            when {
+                href.startsWith("http") -> routes.add(href)
+                href.startsWith("/") -> routes.add("https://one.kmcloud.lol" + href)
+            }
+        }
+        if (routes.isEmpty()) {
+            for (m in routeRegex.findAll(html)) {
+                routes.add("https://" + m.value)
+            }
+        }
+        // The hub page might already carry direct host URLs.
+        pixeldrainIdRegex.find(html)?.groupValues?.get(1)?.let { id ->
+            emitPixeldrain(job, id, callback)
+            found = true
+        }
+        if (found) return true
+        gofileRegex.find(html)?.value?.let { path ->
+            try {
+                if (loadExtractor("https://" + path, job.url, subtitleCallback, callback)) {
+                    found = true
+                }
+            } catch (e: Exception) {
+                // Fall through to the route-based attempts below.
+            }
+        }
+        if (found) return true
+
         val pixeldrain = routes.firstOrNull { it.contains("/pixeldrain") }
         if (pixeldrain != null) {
             try {
-                val finalUrl = app.get(pixeldrain).url
-                val id = Regex("""pixeldrain\.com/u/([A-Za-z0-9]+)""")
-                    .find(finalUrl)?.groupValues?.get(1)
+                val pdResp = app.get(pixeldrain, headers = mapOf("Referer" to job.url))
+                val id = pixeldrainIdRegex.find(pdResp.url)?.groupValues?.get(1)
+                    ?: pixeldrainIdRegex.find(pdResp.text)?.groupValues?.get(1)
                 if (id != null) {
-                    callback.invoke(
-                        newExtractorLink(
-                            name,
-                            job.label + " · Pixeldrain",
-                            "https://pixeldrain.com/api/file/" + id,
-                            ExtractorLinkType.VIDEO
-                        ) {
-                            this.referer = "$mainUrl/"
-                            this.quality = job.quality
-                        }
-                    )
+                    emitPixeldrain(job, id, callback)
                     found = true
                 }
             } catch (e: Exception) {
@@ -244,14 +305,178 @@ class KMProvider : MainAPI() {
         val gofile = routes.firstOrNull { it.contains("/gofile") }
         if (gofile != null) {
             try {
-                val finalUrl = app.get(gofile).url
-                if (finalUrl.contains("gofile.io/d/")) {
-                    if (loadExtractor(finalUrl, job.url, subtitleCallback, callback)) {
+                val gfResp = app.get(gofile, headers = mapOf("Referer" to job.url))
+                val finalUrl = gfResp.url
+                val gofileUrl = if (finalUrl.contains("gofile.io/d/")) {
+                    finalUrl
+                } else {
+                    gofileRegex.find(gfResp.text)?.value?.let { "https://" + it }
+                }
+                if (gofileUrl != null) {
+                    if (loadExtractor(gofileUrl, job.url, subtitleCallback, callback)) {
                         found = true
                     }
                 }
             } catch (e: Exception) {
                 // Same reasoning as above.
+            }
+        }
+        if (found) return true
+
+        // Last resort: the hub's mydirect route, scanned for anything
+        // playable (a host page URL or a direct file URL).
+        val mydirect = routes.firstOrNull { it.contains("/mydirect") }
+            ?: (job.url.replace("/s/", "/d/") + "/mydirect")
+        try {
+            val mdResp = app.get(mydirect, headers = mapOf("Referer" to job.url))
+            val mdHtml = mdResp.text
+            val pdId = pixeldrainIdRegex.find(mdHtml)?.groupValues?.get(1)
+            if (pdId != null) {
+                emitPixeldrain(job, pdId, callback)
+                found = true
+            }
+            val gf = gofileRegex.find(mdHtml)?.value
+            if (gf != null) {
+                if (loadExtractor("https://" + gf, job.url, subtitleCallback, callback)) {
+                    found = true
+                }
+            }
+            if (!found) {
+                val fileUrl = directFileRegex.find(mdHtml)?.value
+                if (fileUrl != null) {
+                    callback.invoke(
+                        newExtractorLink(
+                            name,
+                            job.label + " · Direct",
+                            fileUrl,
+                            ExtractorLinkType.VIDEO
+                        ) {
+                            this.referer = job.url
+                            this.quality = job.quality
+                        }
+                    )
+                    found = true
+                }
+            }
+        } catch (e: Exception) {
+            // Nothing more to try for this hub page.
+        }
+        return found
+    }
+
+    private val skydropRegex = Regex("""https?://[^\s"'<>]*skydrop\.sbs[^\s"'<>]*""")
+    private val transferRegex = Regex("""https?://transfer\.it/t/[A-Za-z0-9]+""")
+    private val vikingRegex = Regex("""https?://vikingfile\.com/f/[A-Za-z0-9]+""")
+    private val buzzRegex = Regex("""https?://bzzhr\.co/[A-Za-z0-9]+""")
+
+    /**
+     * Follow HEAD redirects by hand (no body is ever downloaded) and
+     * report the final URL plus its content type, or null when the
+     * chain cannot be walked at all.
+     */
+    private fun headFinal(url: String): Pair<String, String?>? {
+        var current = url
+        repeat(5) {
+            try {
+                val conn = URL(current).openConnection() as HttpURLConnection
+                conn.requestMethod = "HEAD"
+                conn.instanceFollowRedirects = false
+                conn.connectTimeout = 10000
+                conn.readTimeout = 10000
+                conn.setRequestProperty("User-Agent", "Mozilla/5.0")
+                val code = conn.responseCode
+                val loc = conn.getHeaderField("Location")
+                val type = conn.contentType
+                conn.disconnect()
+                if (code in 300..399 && !loc.isNullOrBlank()) {
+                    current = URL(URL(current), loc).toString()
+                } else {
+                    return current to type
+                }
+            } catch (e: Exception) {
+                return null
+            }
+        }
+        return current to null
+    }
+
+    /** Emit a direct-download endpoint (skydrop, transfer.it) as a link. */
+    private fun emitDirect(
+        job: DlJob,
+        hostLabel: String,
+        url: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val resolved = headFinal(url)
+        val finalUrl = resolved?.first ?: url
+        val type = resolved?.second
+        val looksLikeFile = finalUrl != url || type == null ||
+            type.startsWith("video") || type.contains("octet-stream")
+        if (!looksLikeFile) return false
+        callback.invoke(
+            newExtractorLink(
+                name,
+                job.label + " · " + hostLabel,
+                finalUrl,
+                ExtractorLinkType.VIDEO
+            ) {
+                this.referer = job.url
+                this.quality = job.quality
+            }
+        )
+        return true
+    }
+
+    /**
+     * Resolve one magiclinks hub page (the WebDL buttons). The page
+     * is a second hub whose buttons are direct host anchors: gofile
+     * goes through the built-in extractor, skydrop and transfer.it
+     * are direct-download endpoints, and vikingfile / buzzheavier
+     * pages are offered to the extractor dispatcher as a best
+     * effort. The page sits behind a Cloudflare check, so any of
+     * this may quietly fail per-title; the kmcloud links still work.
+     */
+    private suspend fun resolveMagic(
+        job: DlJob,
+        postUrl: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        var found = false
+        val resp = try {
+            app.get(job.url, headers = mapOf("Referer" to postUrl))
+        } catch (e: Exception) {
+            return false
+        }
+        val html = resp.text
+        gofileRegex.find(html)?.value?.let { path ->
+            try {
+                if (loadExtractor("https://" + path, job.url, subtitleCallback, callback)) {
+                    found = true
+                }
+            } catch (e: Exception) {
+                // Other hosts on the hub may still resolve.
+            }
+        }
+        pixeldrainIdRegex.find(html)?.groupValues?.get(1)?.let { id ->
+            emitPixeldrain(job, id, callback)
+            found = true
+        }
+        skydropRegex.find(html)?.value?.let { u ->
+            if (emitDirect(job, "Skydrop", u, callback)) found = true
+        }
+        transferRegex.find(html)?.value?.let { u ->
+            if (emitDirect(job, "TransferIt", u, callback)) found = true
+        }
+        for (rx in listOf(vikingRegex, buzzRegex)) {
+            rx.find(html)?.value?.let { u ->
+                try {
+                    if (loadExtractor(u, job.url, subtitleCallback, callback)) {
+                        found = true
+                    }
+                } catch (e: Exception) {
+                    // Best effort only.
+                }
             }
         }
         return found
@@ -267,7 +492,13 @@ class KMProvider : MainAPI() {
         if (jobs.isEmpty()) return false
         val results = coroutineScope {
             jobs.map { job ->
-                async { resolveHub(job, subtitleCallback, callback) }
+                async {
+                    if (job.url.contains("magiclinks.lol")) {
+                        resolveMagic(job, data, subtitleCallback, callback)
+                    } else {
+                        resolveHub(job, data, subtitleCallback, callback)
+                    }
+                }
             }.awaitAll()
         }
         return results.any { it }
