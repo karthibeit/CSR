@@ -461,7 +461,7 @@ class CTVProvider : MainAPI() {
             ?: return false
 
         var subtitlesSent = false
-        fun sendSubtitles(subs: List<SubtitleData>?) {
+        suspend fun sendSubtitles(subs: List<SubtitleData>?) {
             if (subtitlesSent) return
             val list = subs.orEmpty()
             if (list.isEmpty()) return
