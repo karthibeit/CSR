@@ -3,6 +3,6 @@
   "description": "CloudStream plugins by karthibeit: 1TamilMV (OTM), TamilMV (TML), 4KHUB, TamilDhool (TDL), TamilGun (TGN), CastleTV (CTV) and Einthusan (EIN).",
   "manifestVersion": 1,
   "pluginLists": [
-    "https://cdn.jsdelivr.net/gh/karthibeit/CSR@4177e97210bf3170fa0a09dbf2f4c5b3b549a283/plugins.json"
+    "https://cdn.jsdelivr.net/gh/karthibeit/CSR@78697e774a2fb3a505c803cffdefd76096b80930/plugins.json"
   ]
 }
