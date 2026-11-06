@@ -1,1 +1,8 @@
-{"description":"Karthi's Tamil CloudStream plugins: 1TamilMV (OTM), TML, 4KHUB, TamilDhool (TDL), TamilGun (TGN), CastleTV (CTV), Einthusan (EIN)","manifestVersion":1,"name":"CloudStream Tamil Repo","pluginLists":["https://cdn.jsdelivr.net/gh/karthibeit/CSR@8fb54be26e2f3f6d455f32bcdfedd85e76cbcf57/plugins.json"]}
+{
+  "name": "CSR",
+  "description": "CloudStream plugins by karthibeit: 1TamilMV (OTM), TamilMV (TML), 4KHUB, TamilDhool (TDL), TamilGun (TGN), CastleTV (CTV) and Einthusan (EIN).",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://cdn.jsdelivr.net/gh/karthibeit/CSR@4363b00b618bdd1d1130807bc266451d72d5cf0e/plugins.json"
+  ]
+}
