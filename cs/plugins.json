@@ -155,5 +155,24 @@
     "description": "1TamilMV Tamil sub-forums as main sections — PreDVD, WEB-HD, HD-Rips, HDTV, Web Series and more (magnet/torrent + direct/file-host links)",
     "url": "https://github.com/karthibeit/CSR/raw/main/cs/TML.cs3",
     "name": "TML"
+  },
+  {
+    "fileHash": "sha256-e25a565f6d0ee5051fc9e741f9dfc85f500dce3363dc09b2e4f58d2fb10a3405",
+    "apiVersion": 1,
+    "repositoryUrl": "https://github.com/karthibeit/CSR",
+    "fileSize": 16760,
+    "status": 3,
+    "language": "ta",
+    "authors": [
+      "Karthi"
+    ],
+    "tvTypes": [
+      "Movie"
+    ],
+    "version": 1,
+    "internalName": "TY",
+    "description": "TamilYogi (tamilyogi.se) — Tamil and dubbed movies streamed in-app from its embed players (no torrents)",
+    "url": "https://github.com/karthibeit/CSR/raw/main/cs/TY.cs3",
+    "name": "TY"
   }
 ]
