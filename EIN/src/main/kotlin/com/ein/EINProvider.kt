@@ -14,7 +14,7 @@ import java.net.URLEncoder
  * EIN — Einthusan (einthusan.tv) for CloudStream, with the 1080p fix.
  *
  * Listing and search pages are the site's results pages:
- *   Recent:  /movie/results/?find=Recent&lang=tamil&page=0  (page is 0-based)
+ *   Recent:  /movie/results/?find=Recent&lang=tamil&page=1  (page is 1-based)
  *   Search:  /movie/results/?lang=tamil&query=<text>
  * Cards live in section#UIMovieSummary > ul > li: div.block1 holds the
  * poster, div.block2 > a.title > h3 the title, div.block2 > div.info the
@@ -92,8 +92,13 @@ class EINProvider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-        // The site paginates results with a 0-based page parameter.
-        val url = request.data + "&page=" + (page - 1)
+        // The site's page parameter is 1-based in effect: page=1 is the
+        // first page (same as no parameter), while page=0 returns a
+        // "Page 0" shell with an EMPTY list — that was the v1 bug that
+        // made every home section show no movies (verified live
+        // 2026-11-06). CloudStream's page is already 1-based, so it is
+        // passed through unchanged.
+        val url = request.data + "&page=" + page
         val doc = app.get(url).document
         val items = doc.movieCards()
         val totalPages = doc.selectFirst("div.results-info p")?.text()
