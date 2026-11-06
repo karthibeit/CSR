@@ -21,17 +21,20 @@ import java.net.URLEncoder
  * year, and an i.hd icon marks titles the site flags as HD.
  *
  * A watch page (/movie/watch/<CODE>/?lang=...) carries one
- * section#UIVideoPlayer whose data-mp4-link and data-hls-link attributes
- * point at the free file D<CODE>.mp4 on a signed IP host. That is the
- * only file the site's own player (and the CNC plugin) ever offers, and
- * on current titles it is only 720x480.
+ * section#UIVideoPlayer with a data-content-id (the title's CODE) and
+ * signed data-mp4-link / data-hls-link URLs on bare IP hosts. Those
+ * signed IP links do not actually play from real networks (the
+ * connection hangs — verified 2026-11-06, and the reason v1/v2's
+ * default links failed on-device), so loadLinks ignores them except
+ * as a last resort.
  *
- * The site's CDN (cdn2.einthusan.io/etv/content/) also stores a separate
- * UHD file B<CODE>.mp4 for many titles — verified live 2026-11-06:
- * Immortal (2026), code 14K4, has B14K4.mp4 at 1920x1080, reachable
- * anonymously, while D14K4.mp4 is 720x480. Not every title has one
- * (e.g. 5SXG has none), so loadLinks probes the B file with a HEAD
- * request and only adds the "1080p UHD" link when it really exists.
+ * The files themselves answer unsigned on the site's CDN domain:
+ * cdn2.einthusan.io/etv/content/D<CODE>.mp4 is the free default file
+ * (on current titles only 720x480 — the "720p" users see), and many
+ * titles also have a separate UHD file B<CODE>.mp4 — verified live
+ * 2026-11-06: Immortal (2026), code 14K4, has B14K4.mp4 at 1920x1080,
+ * while 5SXG has none. loadLinks HEAD-probes both CDN files and only
+ * adds the links that really exist.
  * All patterns were verified live against the site on 2026-11-06.
  */
 class EINProvider : MainAPI() {
@@ -205,8 +208,13 @@ class EINProvider : MainAPI() {
             ?: return false
         var found = false
 
-        // The fix: the site's separate UHD file, offered only when the
-        // probe proves it exists for this title.
+        // Playback URLs are built on the public CDN domain, NOT taken
+        // from the page's data-mp4-link / data-hls-link: those are
+        // signed URLs on bare per-session IP hosts, and connections to
+        // them hang from real networks (verified 2026-11-06 — the
+        // reason v1/v2's HLS and MP4 links would not play). The same
+        // files answer fine on cdn2.einthusan.io without any signing,
+        // which is also how the CNC plugin plays them.
         val uhdUrl = "https://cdn2.einthusan.io/etv/content/B$code.mp4"
         if (headOk(uhdUrl)) {
             callback.invoke(
@@ -219,10 +227,10 @@ class EINProvider : MainAPI() {
             found = true
         }
 
-        val hls = player.attr("data-hls-link").trim()
-        if (hls.isNotBlank()) {
+        val mp4Url = "https://cdn2.einthusan.io/etv/content/D$code.mp4"
+        if (headOk(mp4Url)) {
             callback.invoke(
-                newExtractorLink(name, "HLS (site default)", hls, ExtractorLinkType.M3U8) {
+                newExtractorLink(name, "MP4", mp4Url, ExtractorLinkType.VIDEO) {
                     this.referer = "$mainUrl/"
                     this.headers = mapOf("Referer" to "$mainUrl/")
                     this.quality = Qualities.Unknown.value
@@ -231,16 +239,31 @@ class EINProvider : MainAPI() {
             found = true
         }
 
-        val mp4 = player.attr("data-mp4-link").trim()
-        if (mp4.isNotBlank()) {
-            callback.invoke(
-                newExtractorLink(name, "MP4 (site default)", mp4, ExtractorLinkType.VIDEO) {
-                    this.referer = "$mainUrl/"
-                    this.headers = mapOf("Referer" to "$mainUrl/")
-                    this.quality = Qualities.Unknown.value
-                }
-            )
-            found = true
+        // Last resort only: if neither CDN file exists for this title,
+        // hand over the page's own signed links rather than nothing.
+        if (!found) {
+            val hls = player.attr("data-hls-link").trim()
+            if (hls.isNotBlank()) {
+                callback.invoke(
+                    newExtractorLink(name, "HLS (site)", hls, ExtractorLinkType.M3U8) {
+                        this.referer = "$mainUrl/"
+                        this.headers = mapOf("Referer" to "$mainUrl/")
+                        this.quality = Qualities.Unknown.value
+                    }
+                )
+                found = true
+            }
+            val mp4 = player.attr("data-mp4-link").trim()
+            if (mp4.isNotBlank()) {
+                callback.invoke(
+                    newExtractorLink(name, "MP4 (site)", mp4, ExtractorLinkType.VIDEO) {
+                        this.referer = "$mainUrl/"
+                        this.headers = mapOf("Referer" to "$mainUrl/")
+                        this.quality = Qualities.Unknown.value
+                    }
+                )
+                found = true
+            }
         }
 
         return found
