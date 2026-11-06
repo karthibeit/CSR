@@ -40,10 +40,10 @@
     "name": "CTV"
   },
   {
-    "fileHash": "sha256-300abfaff7d2af1d2e297b031c9e88fe7d5f1cd16f00942532dfb3fd191d6f6c",
+    "fileHash": "sha256-abe8ddff662914d54b206a6287b9d1a75ab6ef37e2c850565b56083bbd610ac5",
     "apiVersion": 1,
     "repositoryUrl": "https://github.com/karthibeit/CSR",
-    "fileSize": 14950,
+    "fileSize": 15559,
     "status": 3,
     "language": "ta",
     "authors": [
@@ -52,7 +52,7 @@
     "tvTypes": [
       "Movie"
     ],
-    "version": 2,
+    "version": 3,
     "internalName": "EIN",
     "description": "Einthusan movies (Tamil, Hindi, Telugu, Malayalam and more) — adds the site's separate 1080p UHD file as its own link whenever a title has one",
     "url": "https://github.com/karthibeit/CSR/raw/main/cs/EIN.cs3",
