@@ -195,16 +195,10 @@ class EINProvider : MainAPI() {
             .replace(Regex("""\s+"""), " ")
         val poster = normalizeUrl(doc.selectFirst("meta[property=og:image]")?.attr("content"))
             ?: normalizeUrl(doc.selectFirst("div.block1 > a > img")?.attr("src"))
-        // Same real-max-quality badge as the listing cards.
-        val code = player?.attr("data-content-id")?.trim()?.takeIf { it.isNotBlank() }
-            ?: Regex("""/movie/watch/([^/?]+)""").find(url)?.groupValues?.get(1)
-        val quality = if (
-            code != null && headOk("https://cdn2.einthusan.io/etv/content/B$code.mp4", 5000)
-        ) {
-            SearchQuality.UHD
-        } else {
-            null
-        }
+        // Note: the detail page gets no quality badge — this app
+        // version's load-response builder has no quality field (v4's
+        // first build failed on exactly that). The listing cards carry
+        // the real-max-quality badge instead.
         val plot = doc.selectFirst("p.synopsis")?.text()?.trim()
             ?.takeIf { it.isNotBlank() }
         val genre = player?.attr("data-genre")?.trim()
@@ -223,7 +217,6 @@ class EINProvider : MainAPI() {
             this.posterUrl = poster
             this.plot = plot
             this.year = year
-            this.quality = quality
             this.tags = genre?.let { listOf(it.replaceFirstChar { c -> c.uppercase() }) }
             this.score = score
         }
