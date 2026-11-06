@@ -1,5 +1,5 @@
 // Use an integer for version numbers — bump it on every release.
-version = 3
+version = 4
 
 cloudstream {
     description = "Einthusan movies (Tamil, Hindi, Telugu, Malayalam and more) — adds the site's separate 1080p UHD file as its own link whenever a title has one"
