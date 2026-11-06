@@ -147,6 +147,7 @@ class CTVProvider : MainAPI() {
         val title: String? = null,
         val coverImage: String? = null,
         val redirectId: Long? = null,
+        val redirectType: Int? = null,
         val movieType: Int? = null,
         val score: Double? = null,
         val languages: List<String>? = null
@@ -258,6 +259,15 @@ class CTVProvider : MainAPI() {
         for (row in resp.data?.rows.orEmpty()) {
             val rowName = row.name?.takeIf { it.isNotBlank() } ?: continue
             val items = row.contents.orEmpty().mapNotNull { item ->
+                // Home rows also carry non-playable entries — the
+                // "Bollywood Star" row is actor profiles (redirectType 2,
+                // no movieType, no episodes behind them). Showing them
+                // as movies produced dead cards that open to nothing,
+                // so they are filtered out here (verified live 2026-11-06:
+                // 89 of 762 home entries were actor profiles).
+                if (item.movieType == null || item.redirectType == 2) {
+                    return@mapNotNull null
+                }
                 val id = item.redirectId ?: return@mapNotNull null
                 val title = item.title?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
                 val type = typeOf(item.movieType)
@@ -478,11 +488,23 @@ class CTVProvider : MainAPI() {
         }
         sendSubtitles(episode.subtitles)
 
-        val resolutions = episode.videos.orEmpty()
+        // Only ask for resolutions the server will actually serve to a
+        // free/anonymous session: the episode metadata flags the 1080p
+        // stream as premium (premiumProPermission) on essentially every
+        // movie, and getVideo2 then denies it — verified live 2026-11-06
+        // on Jailer 2, Jawan, Leo and others, under every request
+        // variation. Asking anyway just wastes seconds per title.
+        val offered = episode.videos.orEmpty()
+        val freeResolutions = offered
+            .filter { it.premiumProPermission != true }
             .mapNotNull { it.resolution }
             .distinct()
             .sortedDescending()
-            .ifEmpty { listOf(3, 2, 1) }
+        val resolutions = freeResolutions
+            .ifEmpty {
+                offered.mapNotNull { it.resolution }.distinct().sortedDescending()
+            }
+            .ifEmpty { listOf(2, 1) }
 
         // Group the tracks the way the title is packaged: tracks with
         // their own video are fetched per language; the rest share the
@@ -536,7 +558,7 @@ class CTVProvider : MainAPI() {
                     append(job.label)
                     append(" · ")
                     append(qualityLabel)
-                    if (video.isPreview == true) append(" (preview)")
+                    if (video.isPreview == true) append(" (preview only)")
                 }
                 callback.invoke(
                     newExtractorLink(name, linkName, videoUrl, ExtractorLinkType.M3U8) {
