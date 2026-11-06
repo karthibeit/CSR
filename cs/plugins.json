@@ -15,9 +15,29 @@
     ],
     "version": 14,
     "internalName": "4KHUB",
-    "description": "4KHDHub — movies and web series in 4K/HD (HubCloud/HubDrive links): Hindi, English, Korean, OTT originals, anime and more",
+    "description": "4KHDHub \u2014 movies and web series in 4K/HD (HubCloud/HubDrive links): Hindi, English, Korean, OTT originals, anime and more",
     "url": "https://karthibeit.github.io/CSR/cs/4KHUB.cs3",
     "name": "4KHUB"
+  },
+  {
+    "fileHash": "sha256-282368be7b20a077173e963329836c358be75a53a54ec02a34d3459fb2c7c013",
+    "apiVersion": 1,
+    "repositoryUrl": "https://github.com/karthibeit/CSR",
+    "fileSize": 43961,
+    "status": 3,
+    "language": "ta",
+    "authors": [
+      "Karthi"
+    ],
+    "tvTypes": [
+      "Movie",
+      "TvSeries"
+    ],
+    "version": 1,
+    "internalName": "CTV",
+    "description": "CastleTV \u2014 movies and series from the Castle catalog with a separate link for every audio language (multi-audio titles are labelled, play those via VLC to pick the language)",
+    "url": "https://karthibeit.github.io/CSR/cs/CTV.cs3",
+    "name": "CTV"
   },
   {
     "fileHash": "sha256-1decfce71376eeb58829c28ab2c4cfe3631707eb78fe890856d5f7b8d4025dd3",
@@ -35,7 +55,7 @@
     ],
     "version": 9,
     "internalName": "OTM",
-    "description": "1TamilMV forum — Tamil, Telugu, Malayalam, Kannada and Hindi releases (magnet/torrent + direct/file-host links)",
+    "description": "1TamilMV forum \u2014 Tamil, Telugu, Malayalam, Kannada and Hindi releases (magnet/torrent + direct/file-host links)",
     "url": "https://karthibeit.github.io/CSR/cs/OTM.cs3",
     "name": "OTM"
   },
@@ -55,7 +75,7 @@
     ],
     "version": 1,
     "internalName": "TDL",
-    "description": "TamilDhool — Tamil TV serials and shows (Sun TV, Vijay TV, Zee Tamil, Sony Vizha) with daily episodes and Bigg Boss Tamil live",
+    "description": "TamilDhool \u2014 Tamil TV serials and shows (Sun TV, Vijay TV, Zee Tamil, Sony Vizha) with daily episodes and Bigg Boss Tamil live",
     "url": "https://karthibeit.github.io/CSR/cs/TDL.cs3",
     "name": "TDL"
   },
@@ -74,7 +94,7 @@
     ],
     "version": 1,
     "internalName": "TGN",
-    "description": "TamilGun — Tamil HD movies, dubbed movies, web series and Malayalam movies streaming, plus Bigg Boss Tamil live",
+    "description": "TamilGun \u2014 Tamil HD movies, dubbed movies, web series and Malayalam movies streaming, plus Bigg Boss Tamil live",
     "url": "https://karthibeit.github.io/CSR/cs/TGN.cs3",
     "name": "TGN"
   },
@@ -94,7 +114,7 @@
     ],
     "version": 9,
     "internalName": "TML",
-    "description": "1TamilMV Tamil sub-forums as main sections — PreDVD, WEB-HD, HD-Rips, HDTV, Web Series and more (magnet/torrent + direct/file-host links)",
+    "description": "1TamilMV Tamil sub-forums as main sections \u2014 PreDVD, WEB-HD, HD-Rips, HDTV, Web Series and more (magnet/torrent + direct/file-host links)",
     "url": "https://karthibeit.github.io/CSR/cs/TML.cs3",
     "name": "TML"
   }
