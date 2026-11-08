@@ -286,6 +286,52 @@ class XDProvider : MainAPI() {
         return out
     }
 
+    /**
+     * Primary version scan over the raw page HTML: pair every
+     * download URL with the closest preceding filename and the
+     * size printed in its button. Independent of the page's DOM
+     * nesting (v1's DOM climb found nothing on the real pages).
+     */
+    private fun scanVersions(html: String): List<Version> {
+        val urlRegex =
+            Regex("""https://link\.xdmovies\.wtf/download/[A-Za-z0-9_\-]+""")
+        val urlMatches = urlRegex.findAll(html).toList()
+        if (urlMatches.isEmpty()) return emptyList()
+        val fileMatches = filenameRegex.findAll(html).toList()
+        val usedFiles = mutableSetOf<Int>()
+        val seenHrefs = mutableSetOf<String>()
+        val out = mutableListOf<Version>()
+        for (u in urlMatches) {
+            val href = u.value
+            if (!seenHrefs.add(href)) continue
+            val fi = fileMatches.indices.lastOrNull {
+                it !in usedFiles && fileMatches[it].range.last < u.range.first
+            }
+            val filename = if (fi != null) {
+                usedFiles += fi
+                fileMatches[fi].groupValues[1].trim()
+            } else ""
+            val afterTo = (u.range.last + 200).coerceAtMost(html.length)
+            var size = sizeRegex.find(html.substring(u.range.first, afterTo))
+                ?.groupValues?.get(1).orEmpty()
+            if (size.isBlank() && fi != null) {
+                val seg = html.substring(
+                    fileMatches[fi].range.first, u.range.first
+                )
+                size = sizeRegex.find(seg)?.groupValues?.get(1).orEmpty()
+            }
+            if (filename.isBlank()) continue
+            val res = Regex("""(2160|1440|1080|720|480|360)p""")
+                .find(filename)?.groupValues?.get(1)?.let { it + "p" }
+                .orEmpty()
+            val label = listOf(res, size)
+                .filter { it.isNotBlank() }.joinToString(" · ")
+                .ifBlank { filename }
+            out.add(Version(label, filename, size, href, qualityOf(filename)))
+        }
+        return out
+    }
+
     override suspend fun load(url: String): LoadResponse {
         val doc = fetchDoc(url)
         val title = doc.selectFirst("h1")?.text()?.trim()
@@ -377,24 +423,45 @@ class XDProvider : MainAPI() {
      * The first hop (link.xdmovies.wtf) is a plain 302; the step
      * page behind it is walked in a browser view by XdCf.
      */
-    private suspend fun resolveVersionTarget(buttonUrl: String): String? {
+    private suspend fun resolveVersionTarget(
+        buttonUrl: String,
+        diag: MutableList<String>? = null
+    ): String? {
         val hubInText = Regex("""https?://[^\s"'<>]*(?:hubcloud|hubdrive)[^\s"'<>]*""")
         try {
             val resp = app.get(buttonUrl, allowRedirects = false)
+            diag?.add("btn code=${resp.code}")
             val loc = resp.headers["Location"]
                 ?.takeIf { it.isNotBlank() }
             if (loc != null) {
+                diag?.add(
+                    "btn loc=" + Regex("""^(https?://[^/]+)""")
+                        .find(loc)?.groupValues?.get(1).orEmpty()
+                )
                 if (loc.contains("hubcloud", true) ||
                     loc.contains("hubdrive", true)
                 ) return loc
-                return XdCf.walk(loc)
+                val walked = XdCf.walk(loc)
+                diag?.add("walk=" + (walked ?: "NULL"))
+                return walked
             }
-            hubInText.find(resp.text)?.value?.let { return it }
+            hubInText.find(resp.text)?.value?.let {
+                diag?.add("hub in body")
+                return it
+            }
             // A 200 here means the shortener served the step page
             // (or a challenge) directly: walk the button URL itself.
-            return XdCf.walk(buttonUrl)
+            val walked = XdCf.walk(buttonUrl)
+            diag?.add("walk(self)=" + (walked ?: "NULL"))
+            return walked
         } catch (e: Exception) {
-            return XdCf.walk(buttonUrl)
+            diag?.add(
+                "btn EXC ${e.javaClass.simpleName}: " +
+                    (e.message?.take(60) ?: "")
+            )
+            val walked = XdCf.walk(buttonUrl)
+            diag?.add("walk(exc)=" + (walked ?: "NULL"))
+            return walked
         }
     }
 
@@ -422,7 +489,8 @@ class XDProvider : MainAPI() {
         label: String,
         fallbackQuality: Int,
         subtitleCallback: (SubtitleFile) -> Unit,
-        emit: (ExtractorLink) -> Unit
+        emit: (ExtractorLink) -> Unit,
+        diag: MutableList<String>? = null
     ): Int {
         var emitted = 0
         try {
@@ -442,11 +510,16 @@ class XDProvider : MainAPI() {
                     gamerUrl = gamerOf(app.get(driveUrl, headers = solved).document)
                 }
             }
-            if (gamerUrl.isBlank()) return 0
+            if (gamerUrl.isBlank()) {
+                diag?.add("hub: no #download on drive page")
+                return 0
+            }
+            diag?.add("hub: gamer page found")
 
             var page = app.get(gamerUrl).document
             var buttons = page.select("div.card-body h2 a.btn")
             if (buttons.isEmpty()) buttons = page.select("a.btn[href]")
+            diag?.add("hub: buttons=${buttons.size}")
             if (buttons.isEmpty()) {
                 val solvedG = XdCf.solve(gamerUrl)
                 if (solvedG.isNotEmpty()) {
@@ -540,55 +613,114 @@ class XDProvider : MainAPI() {
         return emitted
     }
 
+    /**
+     * If nothing playable was produced, surface the recorded steps
+     * as link names (the 4KHUB v3 diagnostics pattern) so a single
+     * screenshot shows exactly which stage stopped.
+     */
+    private suspend fun emitDiag(
+        diag: List<String>,
+        data: String,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        for (line in diag) {
+            try {
+                callback(
+                    newExtractorLink(
+                        name, "XD diag: $line", data,
+                        ExtractorLinkType.VIDEO
+                    ) {
+                        this.quality = Qualities.Unknown.value
+                    }
+                )
+            } catch (e: Exception) {
+                // diagnostics must never break the caller
+            }
+        }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val doc = fetchDoc(data)
-        val versions = doc.versions()
-        if (versions.isEmpty()) return false
+        val diag = mutableListOf<String>()
         var any = false
         try {
-            XdCf.beginSession()
-            for (version in versions) {
-                val target = resolveVersionTarget(version.href) ?: continue
-                val n = when {
-                    target.contains("hubcloud", true) -> resolveHubCloud(
-                        target, version.label, version.quality,
-                        subtitleCallback, callback
-                    )
-                    target.contains("hubdrive", true) ||
-                        target.contains("hubcdn", true) -> {
-                        if (loadExtractor(
-                                target, mainUrl, subtitleCallback, callback
-                            )
-                        ) 1 else 0
-                    }
-                    else -> {
-                        if (loadExtractor(
-                                target, mainUrl, subtitleCallback, callback
-                            )
-                        ) 1 else 0
-                    }
-                }
-                if (n == 0 && target.contains("hubcloud", true)) {
-                    // Layout may differ from the 4KHUB flow: give the
-                    // built-in extractor the same URL before giving up.
-                    if (loadExtractor(
-                            target, mainUrl, subtitleCallback, callback
-                        )
-                    ) {
-                        any = true
-                    }
-                } else if (n > 0) {
-                    any = true
+            val first = app.get(data)
+            diag.add("fetch code=${first.code}")
+            var doc = first.document
+            var html = first.text
+            if (looksChallenged(doc, html)) {
+                diag.add("page CHALLENGED")
+                val solved = XdCf.solve(data)
+                diag.add(
+                    "solve=" + if (solved.isEmpty()) "EMPTY" else "OK"
+                )
+                if (solved.isNotEmpty()) {
+                    val r2 = app.get(data, headers = solved)
+                    doc = r2.document
+                    html = r2.text
+                    diag.add("refetch code=${r2.code}")
                 }
             }
-        } finally {
-            XdCf.endSession()
+            var versions = scanVersions(html)
+            diag.add("versions(scan)=${versions.size}")
+            if (versions.isEmpty()) {
+                versions = doc.versions()
+                diag.add("versions(dom)=${versions.size}")
+            }
+            if (versions.isEmpty()) {
+                diag.add("html chars=${html.length}")
+                emitDiag(diag, data, callback)
+                return false
+            }
+            XdCf.beginSession()
+            try {
+                for ((index, version) in versions.withIndex()) {
+                    diag.add("v${index + 1} ${version.label}")
+                    val target = resolveVersionTarget(version.href, diag)
+                        ?: continue
+                    val n = when {
+                        target.contains("hubcloud", true) ->
+                            resolveHubCloud(
+                                target, version.label, version.quality,
+                                subtitleCallback, callback, diag
+                            )
+                        else -> {
+                            if (loadExtractor(
+                                    target, mainUrl,
+                                    subtitleCallback, callback
+                                )
+                            ) 1 else 0
+                        }
+                    }
+                    diag.add("v${index + 1} emitted=$n")
+                    if (n == 0 && target.contains("hubcloud", true)) {
+                        // Layout may differ from the 4KHUB flow:
+                        // give the built-in extractor the same URL
+                        // before giving up on this version.
+                        if (loadExtractor(
+                                target, mainUrl, subtitleCallback, callback
+                            )
+                        ) {
+                            any = true
+                        }
+                    } else if (n > 0) {
+                        any = true
+                    }
+                }
+            } finally {
+                XdCf.endSession()
+            }
+        } catch (e: Exception) {
+            diag.add(
+                "EXC ${e.javaClass.simpleName}: " +
+                    (e.message?.take(80) ?: "")
+            )
         }
+        if (!any) emitDiag(diag, data, callback)
         return any
     }
 }
