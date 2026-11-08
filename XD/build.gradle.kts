@@ -1,5 +1,5 @@
 // Use an integer for version numbers — bump it on every release.
-version = 1
+version = 2
 
 cloudstream {
     description = "XDMovies (huh.xdmovies.wtf) — 4K/HD movies and series in Tamil, Hindi, Telugu, Malayalam and more, resolved through HubCloud"
