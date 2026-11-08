@@ -176,10 +176,10 @@
     "name": "TY"
   },
   {
-    "fileHash": "sha256-c22c2f8d67f91f76920c5078be74a4ed1b6ebb174836929877a17beaf8e92f26",
+    "fileHash": "sha256-32480c46f6f5062d92a0439f72ac2f7dae09db39286555328701bf1dbc6274b5",
     "apiVersion": 1,
     "repositoryUrl": "https://github.com/karthibeit/CSR",
-    "fileSize": 55196,
+    "fileSize": 62003,
     "status": 3,
     "language": "en",
     "authors": [
@@ -189,7 +189,7 @@
       "Movie",
       "TvSeries"
     ],
-    "version": 1,
+    "version": 2,
     "internalName": "XD",
     "description": "XDMovies (huh.xdmovies.wtf) \u2014 4K/HD movies and series in Tamil, Hindi, Telugu, Malayalam and more, resolved through HubCloud",
     "url": "https://github.com/karthibeit/CSR/raw/main/cs/XD.cs3",
