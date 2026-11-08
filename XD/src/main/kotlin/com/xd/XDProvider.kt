@@ -157,13 +157,14 @@ class XDProvider : MainAPI() {
                 "Referer" to "$mainUrl/"
             )
         )
-        val items = try {
-            mapper.readValue(
+        val items: List<SearchItem> = try {
+            val arr: Array<SearchItem> = mapper.readValue(
                 resp.text,
                 mapper.typeFactory.constructArrayType(SearchItem::class.java)
-            ).toList()
+            )
+            arr.toList()
         } catch (e: Exception) {
-            emptyList<SearchItem>()
+            emptyList()
         }
         return items.mapNotNull { item ->
             val title = item.title?.trim()?.takeIf { it.isNotBlank() }
