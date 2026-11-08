@@ -1,8 +1,8 @@
 {
   "name": "CSR",
-  "description": "CloudStream plugins by karthibeit: 1TamilMV (OTM), TamilMV (TML), 4KHUB, TamilDhool (TDL), TamilGun (TGN), CastleTV (CTV), Einthusan (EIN), KMMovies (KM) and TamilYogi (TY).",
+  "description": "CloudStream plugins by karthibeit: 1TamilMV (OTM), TamilMV (TML), 4KHUB, TamilDhool (TDL), TamilGun (TGN), CastleTV (CTV), Einthusan (EIN), KMMovies (KM), TamilYogi (TY) and XDMovies (XD).",
   "manifestVersion": 1,
   "pluginLists": [
-    "https://cdn.jsdelivr.net/gh/karthibeit/CSR@0457839e64aaaace2c58900e52108b6049552339/plugins.json"
+    "https://cdn.jsdelivr.net/gh/karthibeit/CSR@c2a7e4aa2233624b37d74454fdfc912d6fca0b32/plugins.json"
   ]
 }
