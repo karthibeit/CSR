@@ -19,11 +19,13 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.net.URI
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.coroutines.resume
 
 /**
  * Browser-view help for KM (KMMovies).
@@ -55,6 +57,9 @@ object KmCf {
     private var sessionWebView: WebView? = null
     private var sessionStatus: TextView? = null
     private var sessionUa: String? = null
+
+    @Volatile
+    private var lastDownloadUrl: String? = null
 
     private fun hostOf(url: String): String =
         runCatching { URI(url).host }.getOrNull() ?: url
@@ -164,6 +169,112 @@ object KmCf {
         }
     }
 
+    /** Run JS in the session WebView and return its string result. */
+    private suspend fun evalJs(script: String): String {
+        val wv = sessionWebView ?: return ""
+        return suspendCancellableCoroutine { cont ->
+            try {
+                wv.post {
+                    try {
+                        wv.evaluateJavascript(script) { value ->
+                            if (cont.isActive) {
+                                cont.resume(cleanJsValue(value))
+                            }
+                        }
+                    } catch (e: Exception) {
+                        if (cont.isActive) cont.resume("")
+                    }
+                }
+            } catch (e: Exception) {
+                if (cont.isActive) cont.resume("")
+            }
+        }
+    }
+
+    private fun cleanJsValue(value: String?): String {
+        if (value == null || value == "null") return ""
+        var v = value.trim()
+        if (v.length >= 2 && v.startsWith("\"") && v.endsWith("\"")) {
+            v = v.substring(1, v.length - 1)
+        }
+        return v.replace("\\\"", "\"").replace("\\\\", "\\")
+            .replace("\\u0026", "&")
+    }
+
+    private const val HREFS_JS = """
+        (function(){
+          var out = [];
+          var els = document.querySelectorAll('a[href],form[action]');
+          for (var i = 0; i < els.length; i++) {
+            var v = els[i].href || els[i].action;
+            if (v) out.push(v);
+          }
+          var d = document.querySelectorAll(
+            '[data-url],[data-link],[data-href]');
+          for (var j = 0; j < d.length; j++) {
+            var w = d[j].getAttribute('data-url') ||
+                    d[j].getAttribute('data-link') ||
+                    d[j].getAttribute('data-href');
+            if (w) out.push(w);
+          }
+          return JSON.stringify(out);
+        })()
+    """
+
+    private val hrefUrlRegex = Regex("""https?://[^\s"\\]+""")
+
+    /**
+     * Load a page in the session browser view and return the
+     * links of the RENDERED page (the magiclinks server buttons
+     * are only added by the page's own scripts, so the raw HTML
+     * never contains them). Polls until the caller's accept test
+     * passes on the collected links, a download starts (its URL
+     * is returned at once), or the timeout runs out. While a
+     * Cloudflare check is up, the status line asks the user to
+     * tap the verify box in the dialog.
+     */
+    suspend fun fetchHrefs(
+        url: String,
+        timeoutMs: Long = 90_000L,
+        accept: (List<String>) -> Boolean
+    ): List<String>? = sessionMutex.withLock {
+        if (!ensureSession()) return null
+        val wv = sessionWebView ?: return null
+        sessionCancelled.set(false)
+        lastDownloadUrl = null
+        setStatus("Opening the WebDL page…")
+        withContext(Dispatchers.Main) {
+            runCatching { wv.loadUrl(url) }
+        }
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var toldVerify = false
+        while (System.currentTimeMillis() < deadline) {
+            if (sessionCancelled.get()) return null
+            delay(1000)
+            lastDownloadUrl?.let { return listOf(it) }
+            val title = evalJs("document.title || ''")
+            if (!toldVerify &&
+                (title.contains("Just a moment", true) ||
+                    title.contains("Attention Required", true))
+            ) {
+                toldVerify = true
+                setStatus(
+                    "Tap “Verify you are human” in the box " +
+                        "below (TV: pointer + OK)."
+                )
+            }
+            val raw = evalJs(HREFS_JS)
+            if (raw.isBlank()) continue
+            val hrefs = hrefUrlRegex.findAll(raw)
+                .map { it.value }.distinct().toList()
+            if (hrefs.isNotEmpty() && accept(hrefs)) {
+                setStatus("Got the page — reading its links…")
+                return hrefs
+            }
+        }
+        null
+    }
+
     /**
      * Build (once) the shared session dialog + WebView, modelled
      * on the 4KHUB plugin's interactive verify dialog, including
@@ -189,6 +300,9 @@ object KmCf {
                 val wv = WebView(activity).apply {
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
+                    setDownloadListener { url, _, _, _, _ ->
+                        if (url != null) lastDownloadUrl = url
+                    }
                     isFocusable = true
                     isFocusableInTouchMode = true
                 }
