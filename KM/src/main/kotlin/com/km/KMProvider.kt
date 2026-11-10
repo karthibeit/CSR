@@ -15,7 +15,10 @@ import java.net.URL
 import java.net.URLEncoder
 
 /**
- * KM — KMMOVIES (kmmovies.autos, the new home of Khatrimaza).
+ * KM — KMMOVIES (the new home of Khatrimaza; the site moved
+ * from kmmovies.autos to kmmovies.beer in November 2026 — the
+ * old domain 301-redirects every page, and card URLs carry
+ * the new host, so mainUrl must name the new domain exactly).
  *
  * WordPress catalog with quality-first categories (4K, 10bit, 60fps,
  * BluRay Remux, Dual Audio) and language sections (Tamil, Telugu,
@@ -41,7 +44,7 @@ import java.net.URLEncoder
  * All patterns were verified live against the site on 2026-11-06.
  */
 class KMProvider : MainAPI() {
-    override var mainUrl = "https://kmmovies.autos"
+    override var mainUrl = "https://kmmovies.beer"
     override var name = "KMMovies"
     override val hasMainPage = true
     override var lang = "en"
