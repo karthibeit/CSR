@@ -407,12 +407,12 @@ class KMProvider : MainAPI() {
         url: String,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val resolved = headFinal(url)
-        val finalUrl = resolved?.first ?: url
-        val type = resolved?.second
-        val looksLikeFile = finalUrl != url || type == null ||
-            type.startsWith("video") || type.contains("octet-stream")
-        if (!looksLikeFile) return false
+        val resolved = headFinal(url) ?: return false
+        val finalUrl = resolved.first
+        val type = resolved.second
+        val typeOk = type != null &&
+            (type.startsWith("video") || type.contains("octet-stream"))
+        if (!typeOk && !isFileHref(finalUrl)) return false
         callback.invoke(
             newExtractorLink(
                 name,
@@ -476,14 +476,23 @@ class KMProvider : MainAPI() {
     }
 
     /**
-     * Resolve one magiclinks hub page (the WebDL buttons). The
-     * page sits behind a Cloudflare check that refuses the plain
-     * HTTP client (403 "Just a moment", no host links in it), so
-     * when the plain fetch yields no host links, the check is
-     * solved once in a browser view (KmCf) and the page is
-     * refetched with the solved headers — the same page the
-     * user's browser sees. Returns the success flag plus a
-     * one-line diagnostic when the WebDL route failed.
+     * Resolve one magiclinks hub page (the WebDL buttons).
+     *
+     * Three routes, in order:
+     *  1. Plain fetch of the hub page (works only if the host
+     *     ever serves the anchors without a browser check).
+     *  2. The rendered hub page in the browser view (KmCf):
+     *     the server buttons are added by the page's scripts,
+     *     so only the rendered page has them. GoFile goes to
+     *     the built-in extractor; Skydrop and Transfer.it
+     *     buttons open landing pages, so those are loaded in
+     *     the browser view too and the final file link is
+     *     pulled out of them; VikingFile and BuzzHeavier go
+     *     to the extractor dispatcher.
+     *  3. The v3 route: solve the check, refetch with the
+     *     solved headers, parse the raw page.
+     * Returns the success flag plus a one-line diagnostic
+     * when every route failed.
      */
     private suspend fun resolveMagic(
         job: DlJob,
@@ -501,9 +510,12 @@ class KMProvider : MainAPI() {
         ) {
             return true to null
         }
+        if (resolveMagicViaBrowser(job, subtitleCallback, callback)) {
+            return true to null
+        }
         val solved = KmCf.solve(job.url)
         if (solved.isEmpty()) {
-            return false to "WebDL ${job.label}: solve=EMPTY"
+            return false to "WebDL ${job.label}: browser=EMPTY"
         }
         val html = try {
             app.get(
@@ -516,6 +528,101 @@ class KMProvider : MainAPI() {
         val ok = emitMagicHosts(job, html, subtitleCallback, callback)
         return ok to if (ok) null else
             "WebDL ${job.label}: solve=OK, hosts=0"
+    }
+
+    /** True when any collected link points at a known file host. */
+    private fun hasHostHref(hrefs: List<String>): Boolean {
+        val joined = hrefs.joinToString("\n")
+        return gofileRegex.containsMatchIn(joined) ||
+            skydropRegex.containsMatchIn(joined) ||
+            transferRegex.containsMatchIn(joined) ||
+            vikingRegex.containsMatchIn(joined) ||
+            buzzRegex.containsMatchIn(joined) ||
+            pixeldrainIdRegex.containsMatchIn(joined)
+    }
+
+    /**
+     * Route 2 for resolveMagic: read the hub page's server
+     * buttons out of the browser view that passed the check,
+     * then resolve each host from that rendered page.
+     */
+    private suspend fun resolveMagicViaBrowser(
+        job: DlJob,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val hrefs = KmCf.fetchHrefs(job.url, 120_000L) { hs ->
+            hasHostHref(hs)
+        } ?: return false
+        val joined = hrefs.joinToString("\n")
+        var found = false
+        gofileRegex.find(joined)?.value?.let { path ->
+            try {
+                if (loadExtractor("https://" + path, job.url, subtitleCallback, callback)) {
+                    found = true
+                }
+            } catch (e: Exception) {
+                // Other hosts on the hub may still resolve.
+            }
+        }
+        pixeldrainIdRegex.find(joined)?.groupValues?.get(1)?.let { id ->
+            emitPixeldrain(job, id, callback)
+            found = true
+        }
+        skydropRegex.find(joined)?.value?.let { u ->
+            if (emitHostPageFile(job, "Skydrop", u, callback)) found = true
+        }
+        transferRegex.find(joined)?.value?.let { u ->
+            if (emitHostPageFile(job, "TransferIt", u, callback)) found = true
+        }
+        for (rx in listOf(vikingRegex, buzzRegex)) {
+            rx.find(joined)?.value?.let { u ->
+                try {
+                    if (loadExtractor(u, job.url, subtitleCallback, callback)) {
+                        found = true
+                    }
+                } catch (e: Exception) {
+                    // Best effort only.
+                }
+            }
+        }
+        return found
+    }
+
+    /** True for URLs that name a video file directly. */
+    private fun isFileHref(h: String): Boolean {
+        val clean = h.substringBefore('?').substringBefore('#')
+        return clean.endsWith(".mkv", true) || clean.endsWith(".mp4", true)
+    }
+
+    /**
+     * Open a host landing page (Skydrop, Transfer.it) in the
+     * browser view and emit the first link on it that names a
+     * video file and verifies as one. A download the page
+     * starts on its own is captured by the browser view and
+     * tried as the first candidate.
+     */
+    private suspend fun emitHostPageFile(
+        job: DlJob,
+        hostLabel: String,
+        pageUrl: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val hrefs = KmCf.fetchHrefs(pageUrl, 60_000L) { hs ->
+            hs.any {
+                isFileHref(it) || it.contains("download", true)
+            }
+        } ?: return false
+        val candidates = mutableListOf<String>()
+        if (hrefs.size == 1) candidates += hrefs
+        candidates += hrefs.filter { isFileHref(it) }
+        candidates += hrefs.filter {
+            it.contains("download", true) && !isFileHref(it)
+        }
+        for (h in candidates.distinct().take(6)) {
+            if (emitDirect(job, hostLabel, h, callback)) return true
+        }
+        return false
     }
 
     /**
