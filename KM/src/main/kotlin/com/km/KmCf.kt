@@ -275,6 +275,110 @@ object KmCf {
         null
     }
 
+    private const val READY_JS = """
+        (function(){
+          var has = 0;
+          var els = document.querySelectorAll('a,button,[role="button"]');
+          for (var i = 0; i < els.length; i++) {
+            var t = (els[i].textContent || '').trim().toLowerCase();
+            if (t.indexOf('download') !== -1) { has = 1; break; }
+          }
+          return (document.title || '') + '|' + has;
+        })()
+    """
+
+    private const val CLICK_JS = """
+        (function(){
+          var els = document.querySelectorAll(
+            'a,button,[role="button"],input[type="button"],input[type="submit"]');
+          for (var i = 0; i < els.length; i++) {
+            var t = (els[i].textContent || els[i].value || '')
+              .trim().toLowerCase();
+            if (t.indexOf('download') !== -1) {
+              els[i].click();
+              return 'CLICKED';
+            }
+          }
+          return 'NONE';
+        })()
+    """
+
+    /** The browser session's cookies for a URL, or "". */
+    fun cookiesFor(url: String): String =
+        try {
+            CookieManager.getInstance().getCookie(url) ?: ""
+        } catch (e: Exception) {
+            ""
+        }
+
+    /**
+     * Load a host landing page (Skydrop, Transfer.it) in the
+     * session browser view and let the page run its own flow:
+     * Skydrop's first page asks its server for a private link
+     * and jumps to a "Your video is ready" page whose Download
+     * button starts the file. This watches for that button,
+     * clicks it, and returns the URL the download starts
+     * with. The browser view itself does not download the
+     * file (its download listener hands the URL to us), so a
+     * one-use link is not consumed. Null on timeout.
+     */
+    suspend fun captureDownload(
+        url: String,
+        timeoutMs: Long = 120_000L
+    ): String? = sessionMutex.withLock {
+        if (!ensureSession()) return null
+        val wv = sessionWebView ?: return null
+        sessionCancelled.set(false)
+        lastDownloadUrl = null
+        val host = hostOf(url)
+        setStatus(
+            "Opening $host — its download starts by itself, " +
+                "no tap needed…"
+        )
+        withContext(Dispatchers.Main) {
+            runCatching { wv.loadUrl(url) }
+        }
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var toldVerify = false
+        var lastClick = 0L
+        while (System.currentTimeMillis() < deadline) {
+            if (sessionCancelled.get()) return null
+            delay(1000)
+            lastDownloadUrl?.let { return it }
+            val probe = evalJs(READY_JS)
+            val title = probe.substringBefore('|')
+            val hasDl = probe.substringAfter('|', "") == "1"
+            if (!toldVerify &&
+                (title.contains("Just a moment", true) ||
+                    title.contains("Attention Required", true))
+            ) {
+                toldVerify = true
+                setStatus(
+                    "Tap “Verify you are human” in the box " +
+                        "below (TV: pointer + OK)."
+                )
+                continue
+            }
+            if (hasDl &&
+                System.currentTimeMillis() - lastClick > 4000
+            ) {
+                val currentHost = withContext(Dispatchers.Main) {
+                    runCatching { wv.url?.let { hostOf(it) } }
+                        .getOrNull()
+                }
+                if (currentHost == host) {
+                    lastClick = System.currentTimeMillis()
+                    setStatus(
+                        "Starting the $host download to " +
+                            "capture its link…"
+                    )
+                    evalJs(CLICK_JS)
+                }
+            }
+        }
+        null
+    }
+
     /**
      * Build (once) the shared session dialog + WebView, modelled
      * on the 4KHUB plugin's interactive verify dialog, including
