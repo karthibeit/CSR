@@ -59,10 +59,10 @@
     "name": "EIN"
   },
   {
-    "fileHash": "sha256-6369d7d07ee500f50d99fcca9f9f8edb7bbc3c79cc2098939a4337a248ea995a",
+    "fileHash": "sha256-02a0976bad7818b3b275f9ec9b212df3a37487c0f0af90b9451421e5c8a2a263",
     "apiVersion": 1,
     "repositoryUrl": "https://github.com/karthibeit/CSR",
-    "fileSize": 30392,
+    "fileSize": 47166,
     "status": 3,
     "language": "en",
     "authors": [
@@ -71,7 +71,7 @@
     "tvTypes": [
       "Movie"
     ],
-    "version": 2,
+    "version": 3,
     "internalName": "KM",
     "description": "KMMOVIES (kmmovies.autos) \u2014 4K, 10bit, BluRay and dual-audio movies plus web series in Tamil, Hindi, Telugu and more, played from direct file hosts (Pixeldrain, GoFile)",
     "url": "https://github.com/karthibeit/CSR/raw/main/cs/KM.cs3",
