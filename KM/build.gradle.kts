@@ -1,5 +1,5 @@
 // Use an integer for version numbers — bump it on every release.
-version = 4
+version = 5
 
 cloudstream {
     description = "KMMOVIES (kmmovies.autos) — 4K, 10bit, BluRay and dual-audio movies plus web series in Tamil, Hindi, Telugu and more, played from direct file hosts (Pixeldrain, GoFile)"
