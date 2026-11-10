@@ -9,6 +9,7 @@ import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import org.jsoup.nodes.Document
 import java.net.HttpURLConnection
 import java.net.URL
@@ -573,7 +574,9 @@ class KMProvider : MainAPI() {
             found = true
         }
         skydropRegex.find(joined)?.value?.let { u ->
-            if (emitHostPageFile(job, "Skydrop", u, callback)) found = true
+            if (resolveSkydrop(job, u, callback) ||
+                emitHostPageFile(job, "Skydrop", u, callback)
+            ) found = true
         }
         transferRegex.find(joined)?.value?.let { u ->
             if (emitHostPageFile(job, "TransferIt", u, callback)) found = true
@@ -590,6 +593,100 @@ class KMProvider : MainAPI() {
             }
         }
         return found
+    }
+
+    private val skyReadyRegex =
+        Regex(""""ready_url"\s*:\s*"((?:[^"\\]|\\.)*)"""")
+
+    /** One plain HTTP call in the Skydrop flow. */
+    private fun skyCall(
+        url: String,
+        method: String,
+        referer: String
+    ): Pair<Int, Map<String, String>> {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        conn.requestMethod = method
+        conn.instanceFollowRedirects = false
+        conn.connectTimeout = 15000
+        conn.readTimeout = 15000
+        conn.setRequestProperty("User-Agent", "Mozilla/5.0")
+        conn.setRequestProperty("Referer", referer)
+        if (method == "POST") {
+            conn.doOutput = true
+            conn.outputStream.use { }
+        }
+        val code = conn.responseCode
+        val headers = mutableMapOf<String, String>()
+        var i = 0
+        while (true) {
+            val k = conn.getHeaderFieldKey(i) ?: break
+            val v = conn.getHeaderField(i)
+            if (v != null) headers[k.lowercase()] = v
+            i++
+        }
+        val body = try {
+            (if (code >= 400) conn.errorStream else conn.inputStream)
+                ?.bufferedReader()?.readText() ?: ""
+        } catch (e: Exception) {
+            ""
+        }
+        conn.disconnect()
+        return code to (headers + ("body" to body))
+    }
+
+    /**
+     * Skydrop without the browser. Its "Preparing your
+     * download" page is a small script: it POSTs /resolve/
+     * until the server answers with a ready page path, and
+     * the ready page's form POSTs /fetch/, which answers
+     * 302 to the file itself — a signed Google-hosted URL
+     * that streams the MKV to any plain client (the whole
+     * flow was replayed from a plain HTTP client on
+     * 2026-11-10 and the answer verified as real Matroska
+     * bytes). No cookies are needed; the chain is carried
+     * by the Referer headers. The browser capture stays as
+     * a fallback when this route fails.
+     */
+    private suspend fun resolveSkydrop(
+        job: DlJob,
+        pageUrl: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        return try {
+            val base = Regex("""^(https?://[^/]+)""")
+                .find(pageUrl)?.groupValues?.get(1) ?: return false
+            skyCall(pageUrl, "GET", job.url)
+            var readyPath: String? = null
+            var attempts = 0
+            while (readyPath == null && attempts < 8) {
+                val (_, resp) = skyCall("$base/resolve/", "POST", pageUrl)
+                readyPath = skyReadyRegex.find(resp["body"] ?: "")
+                    ?.groupValues?.get(1)?.replace("\\/", "/")
+                if (readyPath == null) {
+                    attempts++
+                    delay(3000)
+                }
+            }
+            val rp = readyPath ?: return false
+            val readyUrl = if (rp.startsWith("http")) rp else base + rp
+            val (_, fetchResp) = skyCall("$base/fetch/", "POST", readyUrl)
+            val loc = fetchResp["location"]
+            if (loc.isNullOrBlank()) return false
+            callback.invoke(
+                newExtractorLink(
+                    name,
+                    job.label + " · Skydrop",
+                    loc,
+                    ExtractorLinkType.VIDEO
+                ) {
+                    this.referer = readyUrl
+                    this.quality = job.quality
+                }
+            )
+            true
+        } catch (e: Exception) {
+            false
+        }
     }
 
     /** True for URLs that name a video file directly. */
