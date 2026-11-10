@@ -597,10 +597,15 @@ class KMProvider : MainAPI() {
 
     /**
      * Open a host landing page (Skydrop, Transfer.it) in the
-     * browser view and emit the first link on it that names a
-     * video file and verifies as one. A download the page
-     * starts on its own is captured by the browser view and
-     * tried as the first candidate.
+     * browser view and let the page start its own download
+     * the way it would for a user: Skydrop's page first asks
+     * its server for a private link, jumps to a "Your video
+     * is ready" page, and its Download button then starts
+     * the file. The browser view captures the download URL
+     * (it does not download the file itself), and the link
+     * goes out with the browser session's cookies attached,
+     * so the player presents the same session the link was
+     * minted under.
      */
     private suspend fun emitHostPageFile(
         job: DlJob,
@@ -608,21 +613,24 @@ class KMProvider : MainAPI() {
         pageUrl: String,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val hrefs = KmCf.fetchHrefs(pageUrl, 60_000L) { hs ->
-            hs.any {
-                isFileHref(it) || it.contains("download", true)
+        val fileUrl = KmCf.captureDownload(pageUrl, 120_000L)
+            ?: return false
+        val cookies = KmCf.cookiesFor(fileUrl)
+        callback.invoke(
+            newExtractorLink(
+                name,
+                job.label + " · " + hostLabel,
+                fileUrl,
+                ExtractorLinkType.VIDEO
+            ) {
+                this.referer = pageUrl
+                this.quality = job.quality
+                if (cookies.isNotBlank()) {
+                    this.headers = mapOf("Cookie" to cookies)
+                }
             }
-        } ?: return false
-        val candidates = mutableListOf<String>()
-        if (hrefs.size == 1) candidates += hrefs
-        candidates += hrefs.filter { isFileHref(it) }
-        candidates += hrefs.filter {
-            it.contains("download", true) && !isFileHref(it)
-        }
-        for (h in candidates.distinct().take(6)) {
-            if (emitDirect(job, hostLabel, h, callback)) return true
-        }
-        return false
+        )
+        return true
     }
 
     /**
