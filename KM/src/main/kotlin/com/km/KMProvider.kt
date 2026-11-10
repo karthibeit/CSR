@@ -428,27 +428,20 @@ class KMProvider : MainAPI() {
     }
 
     /**
-     * Resolve one magiclinks hub page (the WebDL buttons). The page
-     * is a second hub whose buttons are direct host anchors: gofile
-     * goes through the built-in extractor, skydrop and transfer.it
-     * are direct-download endpoints, and vikingfile / buzzheavier
-     * pages are offered to the extractor dispatcher as a best
-     * effort. The page sits behind a Cloudflare check, so any of
-     * this may quietly fail per-title; the kmcloud links still work.
+     * Emit every host link found on one magiclinks hub page:
+     * gofile goes through the built-in extractor, skydrop and
+     * transfer.it are direct-download endpoints, and vikingfile
+     * and buzzheavier pages are offered to the extractor
+     * dispatcher as a best effort. Returns true when at least one
+     * host produced a link.
      */
-    private suspend fun resolveMagic(
+    private suspend fun emitMagicHosts(
         job: DlJob,
-        postUrl: String,
+        html: String,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var found = false
-        val resp = try {
-            app.get(job.url, headers = mapOf("Referer" to postUrl))
-        } catch (e: Exception) {
-            return false
-        }
-        val html = resp.text
         gofileRegex.find(html)?.value?.let { path ->
             try {
                 if (loadExtractor("https://" + path, job.url, subtitleCallback, callback)) {
@@ -482,6 +475,75 @@ class KMProvider : MainAPI() {
         return found
     }
 
+    /**
+     * Resolve one magiclinks hub page (the WebDL buttons). The
+     * page sits behind a Cloudflare check that refuses the plain
+     * HTTP client (403 "Just a moment", no host links in it), so
+     * when the plain fetch yields no host links, the check is
+     * solved once in a browser view (KmCf) and the page is
+     * refetched with the solved headers — the same page the
+     * user's browser sees. Returns the success flag plus a
+     * one-line diagnostic when the WebDL route failed.
+     */
+    private suspend fun resolveMagic(
+        job: DlJob,
+        postUrl: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Pair<Boolean, String?> {
+        val plainHtml = try {
+            app.get(job.url, headers = mapOf("Referer" to postUrl)).text
+        } catch (e: Exception) {
+            null
+        }
+        if (plainHtml != null &&
+            emitMagicHosts(job, plainHtml, subtitleCallback, callback)
+        ) {
+            return true to null
+        }
+        val solved = KmCf.solve(job.url)
+        if (solved.isEmpty()) {
+            return false to "WebDL ${job.label}: solve=EMPTY"
+        }
+        val html = try {
+            app.get(
+                job.url,
+                headers = solved + ("Referer" to postUrl)
+            ).text
+        } catch (e: Exception) {
+            return false to "WebDL ${job.label}: solve=OK, refetch failed"
+        }
+        val ok = emitMagicHosts(job, html, subtitleCallback, callback)
+        return ok to if (ok) null else
+            "WebDL ${job.label}: solve=OK, hosts=0"
+    }
+
+    /**
+     * When every WebDL button failed, surface the recorded stage
+     * as link names (the diagnostics pattern from XD) so a single
+     * screenshot shows exactly where the WebDL route stopped.
+     */
+    private suspend fun emitDiag(
+        diag: List<String>,
+        data: String,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        for (line in diag) {
+            try {
+                callback(
+                    newExtractorLink(
+                        name, "KM diag: $line", data,
+                        ExtractorLinkType.VIDEO
+                    ) {
+                        this.quality = Qualities.Unknown.value
+                    }
+                )
+            } catch (e: Exception) {
+                // diagnostics must never break the caller
+            }
+        }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -490,17 +552,30 @@ class KMProvider : MainAPI() {
     ): Boolean {
         val jobs = app.get(data).document.downloadJobs()
         if (jobs.isEmpty()) return false
-        val results = coroutineScope {
-            jobs.map { job ->
-                async {
-                    if (job.url.contains("magiclinks.lol")) {
-                        resolveMagic(job, data, subtitleCallback, callback)
-                    } else {
-                        resolveHub(job, data, subtitleCallback, callback)
+        val hasMagic = jobs.any { it.url.contains("magiclinks.lol") }
+        if (hasMagic) KmCf.beginSession()
+        try {
+            val results = coroutineScope {
+                jobs.map { job ->
+                    async {
+                        if (job.url.contains("magiclinks.lol")) {
+                            resolveMagic(job, data, subtitleCallback, callback)
+                        } else {
+                            resolveHub(job, data, subtitleCallback, callback) to null
+                        }
                     }
-                }
-            }.awaitAll()
+                }.awaitAll()
+            }
+            val magicOk = jobs.indices.any {
+                jobs[it].url.contains("magiclinks.lol") && results[it].first
+            }
+            if (hasMagic && !magicOk) {
+                val diag = results.mapNotNull { it.second }
+                if (diag.isNotEmpty()) emitDiag(diag.take(6), data, callback)
+            }
+            return results.any { it.first }
+        } finally {
+            if (hasMagic) KmCf.endSession()
         }
-        return results.any { it }
     }
 }
