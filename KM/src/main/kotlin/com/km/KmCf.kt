@@ -277,11 +277,15 @@ object KmCf {
 
     private const val READY_JS = """
         (function(){
+          var phrases = ['download', 'view content', 'continue'];
           var has = 0;
           var els = document.querySelectorAll('a,button,[role="button"]');
+          outer:
           for (var i = 0; i < els.length; i++) {
             var t = (els[i].textContent || '').trim().toLowerCase();
-            if (t.indexOf('download') !== -1) { has = 1; break; }
+            for (var p = 0; p < phrases.length; p++) {
+              if (t.indexOf(phrases[p]) !== -1) { has = 1; break outer; }
+            }
           }
           return (document.title || '') + '|' + has;
         })()
@@ -289,14 +293,17 @@ object KmCf {
 
     private const val CLICK_JS = """
         (function(){
+          var phrases = ['download', 'view content', 'continue'];
           var els = document.querySelectorAll(
             'a,button,[role="button"],input[type="button"],input[type="submit"]');
-          for (var i = 0; i < els.length; i++) {
-            var t = (els[i].textContent || els[i].value || '')
-              .trim().toLowerCase();
-            if (t.indexOf('download') !== -1) {
-              els[i].click();
-              return 'CLICKED';
+          for (var p = 0; p < phrases.length; p++) {
+            for (var i = 0; i < els.length; i++) {
+              var t = (els[i].textContent || els[i].value || '')
+                .trim().toLowerCase();
+              if (t.indexOf(phrases[p]) !== -1) {
+                els[i].click();
+                return 'CLICKED:' + phrases[p];
+              }
             }
           }
           return 'NONE';
