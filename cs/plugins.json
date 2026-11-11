@@ -98,6 +98,26 @@
         "name": "OTM"
     },
     {
+        "fileHash": "sha256-805e79d58b886da768b31b415aad430a10a2bdeb577fbf7d567683ed62897bae",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/karthibeit/CSR",
+        "fileSize": 28442,
+        "status": 3,
+        "language": "en",
+        "authors": [
+            "Karthi"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TvSeries"
+        ],
+        "version": 1,
+        "internalName": "P4U",
+        "description": "Play4u (play4u.org) \u2014 movies and series streamed in-app, multi-language audio (Hindi, Tamil, Telugu, Malayalam, Kannada and more) up to 1080p",
+        "url": "https://github.com/karthibeit/CSR/raw/main/cs/P4U.cs3",
+        "name": "P4U"
+    },
+    {
         "fileHash": "sha256-f1f10a47dbe383aa3c97bb8a18f3c175197c6ab6916a6e4b604970475d74b17d",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/karthibeit/CSR",
