@@ -1,6 +1,6 @@
 {
-  "name": "CloudStream Tamil Repo",
-  "description": "CloudStream plugins by karthibeit: 1TamilMV (OTM), TamilMV (TML), 4KHUB, TamilDhool (TDL), TamilGun (TGN), CastleTV (CTV), Einthusan (EIN), KMMovies (KM), TamilYogi (TY) and XDMovies (XD).",
+  "name": "Karthi's Extensions",
+  "description": "Personal CloudStream extensions: 1TamilMV (OTM), TamilMV (TML), 4KHUB, TamilDhool (TDL), TamilGun (TGN), CastleTV (CTV), Einthusan 1080p (EIN), KMMovies (KM), TamilYogi (TY), XDMovies (XD) and Play4u (P4U). Tamil movies, dubbed movies and serials.",
   "manifestVersion": 1,
   "pluginLists": [
     "https://karthibeit.github.io/CSR/cs/plugins.json"
