@@ -11,6 +11,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
 import java.net.URLDecoder
 
 /**
@@ -240,7 +241,7 @@ class MYLProvider : MainAPI() {
                 return 0
             }
             val page = app.get(gamerUrl).document
-            var buttons = page.select("div.card-body h2 a.btn")
+            var buttons: List<Element> = page.select("div.card-body h2 a.btn")
             if (buttons.isEmpty()) buttons = page.select("a.btn[href]")
             if (buttons.isEmpty()) {
                 buttons = page.select("a[href]")
