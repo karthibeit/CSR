@@ -1,8 +1,1 @@
-{
-  "name": "Karthi's Plugins",
-  "description": "Personal CloudStream plugins: 1TamilMV, TamilMV, 4KHDHub, TamilDhool, TamilGun, CastleTV, Einthusan 1080p, KMMovies, TamilYogi, XDMovies, Play4u and MyList.",
-  "manifestVersion": 1,
-  "pluginLists": [
-    "https://cdn.jsdelivr.net/gh/karthibeit/CSR@80f257bd036f6f5224a247840a4f622daf6caadf/plugins.json"
-  ]
-}
+{"description":"Personal CloudStream plugins: 1TamilMV, TamilMV, 4KHDHub, TamilDhool, TamilGun, CastleTV, Einthusan 1080p, KMMovies, TamilYogi, XDMovies, Play4u and MyList.","manifestVersion":1,"name":"Karthi's Plugins","pluginLists":["https://cdn.jsdelivr.net/gh/karthibeit/CSR@44a8aafa1eff42297d28047ef04f2addd99dc3a8/plugins.json"]}
