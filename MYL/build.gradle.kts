@@ -1,5 +1,5 @@
 // Use an integer for version numbers — bump it on every release.
-version = 4
+version = 5
 
 cloudstream {
     description = "MyList — your own pasted links (HubCloud, HubDrive, Pixeldrain, direct files), served from your Raspberry Pi on the home network"
