@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MyList server v5 — runs on Karthi's Raspberry Pi.
+"""MyList server v6 — runs on Karthi's Raspberry Pi.
 
 Serves a phone-friendly web app (home-screen icon, manifest) for
 adding links, VERIFIES each pasted link before it joins the list
@@ -14,15 +14,26 @@ english) picked when the link is added and changeable on the web
 page; the plugin shows one home row per category. The page
 itself was redesigned in v5: card layout, posters, grouped
 by category, quality chips.
+The page is also reachable over the public internet through
+Tailscale Funnel, so v6 adds a PIN lock: requests from the
+home LAN or the tailnet are trusted and skip it, while public
+(Funnel) requests must unlock with the PIN — set or changed
+from the page itself, stored only as a salted hash — or carry
+the CloudStream plugin's app token (a random secret in a file
+next to this script, sent as a header by the plugin).
 Data file: links.txt next to this script, one entry per line —
 address|title|poster|category (trailing fields may be omitted).
 """
+import hashlib
+import hmac
 import html
+import ipaddress
 import json
 import os
 import re
 import struct
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -93,6 +104,117 @@ def display_title(entry):
         return title
     tail = unquote(url.split("?")[0].rstrip("/").rsplit("/", 1)[-1])
     return tail or url
+
+
+# ---------------------------------------------------------------
+# PIN lock + app token (public Funnel access)
+# ---------------------------------------------------------------
+
+PIN_FILE = os.path.join(BASE, "pin.txt")
+TOKEN_FILE = os.path.join(BASE, "app_token.txt")
+FAIL_WINDOW = 600
+FAIL_LIMIT = 5
+_unlock_fails = {}
+
+
+def _pin_record():
+    """(salt_hex, hash_hex) from pin.txt, or None when unset."""
+    try:
+        with open(PIN_FILE, encoding="utf-8") as f:
+            salt, _, digest = f.read().strip().partition("$")
+        if salt and digest:
+            return salt, digest
+    except Exception:
+        pass
+    return None
+
+
+def pin_is_set():
+    return _pin_record() is not None
+
+
+def _hash_pin(salt_hex, pin):
+    return hashlib.sha256(
+        (salt_hex + ":" + pin).encode("utf-8")).hexdigest()
+
+
+def check_pin(pin):
+    rec = _pin_record()
+    if rec is None:
+        return False
+    salt, digest = rec
+    return hmac.compare_digest(_hash_pin(salt, pin), digest)
+
+
+def set_pin(pin):
+    salt = os.urandom(16).hex()
+    with open(PIN_FILE, "w", encoding="utf-8") as f:
+        f.write(salt + "$" + _hash_pin(salt, pin) + "\n")
+    try:
+        os.chmod(PIN_FILE, 0o600)
+    except Exception:
+        pass
+
+
+def valid_pin_format(pin):
+    return pin.isdigit() and 4 <= len(pin) <= 8
+
+
+def auth_cookie_value():
+    """Stateless unlock cookie, derived from the stored PIN
+    hash — changing the PIN invalidates every old cookie."""
+    rec = _pin_record()
+    if rec is None:
+        return None
+    return hashlib.sha256(
+        (rec[1] + "|mylist-auth").encode("utf-8")).hexdigest()
+
+
+def app_token():
+    try:
+        with open(TOKEN_FILE, encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+_TRUSTED_NETS = [
+    ipaddress.ip_network(n) for n in (
+        "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+        "100.64.0.0/10", "fc00::/7", "fe80::/10",
+    )
+]
+
+
+def is_trusted(ip):
+    """Home LAN and tailnet sources skip the PIN. Loopback
+    does NOT count: Tailscale Funnel forwards public visitors
+    from 127.0.0.1, so loopback is the untrusted path. The
+    nets are listed explicitly - ipaddress.is_private would
+    also bless documentation/reserved ranges."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except Exception:
+        return False
+    if addr.is_loopback:
+        return False
+    return any(addr in net for net in _TRUSTED_NETS)
+
+
+def unlock_blocked(ip):
+    now = time.time()
+    fails = [t for t in _unlock_fails.get(ip, [])
+             if now - t < FAIL_WINDOW]
+    _unlock_fails[ip] = fails
+    return len(fails) >= FAIL_LIMIT
+
+
+def note_unlock_fail(ip):
+    _unlock_fails.setdefault(ip, []).append(time.time())
+
+
+def clear_unlock_fails(ip):
+    _unlock_fails.pop(ip, None)
 
 
 # ---------------------------------------------------------------
@@ -322,7 +444,7 @@ MANIFEST = json.dumps({
 })
 
 SW = (
-    "const C='mylist-v5';"
+    "const C='mylist-v6';"
     "self.addEventListener('install',e=>{e.waitUntil("
     "caches.open(C).then(c=>c.addAll(['/',"
     "'/manifest.webmanifest','/icon-192.png','/icon-512.png']))"
@@ -404,6 +526,16 @@ border-radius:10px;padding:.5em .95em;font-size:.9rem;font-weight:600}
 .rm:active{background:#38211f}
 .empty{color:var(--mut);text-align:center;padding:28px 12px;
 border:1px dashed var(--line);border-radius:16px;margin-top:14px}
+.pinsec{margin-top:26px;background:var(--card);
+border:1px solid var(--line);border-radius:16px;padding:12px 14px}
+.pinsec summary{cursor:pointer;font-weight:600}
+.pinsec p{color:var(--mut);font-size:.88rem;margin:.6em 0}
+.pinsec input{width:100%;padding:.7em .9em;font-size:1rem;
+border-radius:12px;border:1px solid var(--line);
+background:#101216;color:var(--txt);margin-top:8px}
+.pinsec button{margin-top:10px;background:var(--card2);
+color:var(--txt);border:1px solid var(--line);border-radius:12px;
+padding:.6em 1.1em;font-size:.95rem;font-weight:600}
 </style></head>
 <body>
 <div class="wrap">
@@ -423,6 +555,7 @@ border:1px dashed var(--line);border-radius:16px;margin-top:14px}
 </form>
 <div id="status"></div>
 <div id="list"></div>
+<!--PINSECTION-->
 </div>
 <script>
 function esc(s){return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;")}
@@ -565,38 +698,214 @@ refresh();
 </script>
 </body></html>"""
 
+PIN_PAGE = r"""<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0e1013">
+<link rel="icon" href="/icon-192.png">
+<title>MyList - locked</title>
+<style>
+body{margin:0;background:#0e1013;color:#f2f3f5;
+font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.box{max-width:340px;margin:14vh auto 0;padding:0 16px;
+text-align:center}
+img{width:64px;height:64px;border-radius:16px}
+h1{font-size:1.3rem;margin:.5em 0 .2em}
+p{color:#9aa3af;font-size:.95rem}
+.err{color:#ff8080;min-height:1.2em;margin-top:10px}
+input{width:100%;padding:.8em;font-size:1.3rem;text-align:center;
+letter-spacing:.4em;border-radius:12px;border:1px solid #2b2f38;
+background:#101216;color:#f2f3f5;margin-top:10px}
+button{width:100%;margin-top:12px;background:#ffd100;
+color:#161616;font-weight:700;border:0;border-radius:12px;
+padding:.8em;font-size:1.05rem}
+</style></head>
+<body><div class="box">
+<img src="/icon-192.png" alt="">
+<h1>MyList is locked</h1>
+<p>Enter the PIN to open your list.</p>
+<form method="post" action="/unlock">
+<input type="password" name="pin" inputmode="numeric"
+pattern="[0-9]*" autocomplete="off" autofocus>
+<div class="err">%ERROR%</div>
+<button type="submit">Unlock</button>
+</form>
+</div></body></html>"""
+
+SETUP_PAGE = r"""<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0e1013">
+<link rel="icon" href="/icon-192.png">
+<title>MyList - setup</title>
+<style>
+body{margin:0;background:#0e1013;color:#f2f3f5;
+font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.box{max-width:340px;margin:14vh auto 0;padding:0 16px;
+text-align:center}
+img{width:64px;height:64px;border-radius:16px}
+h1{font-size:1.3rem;margin:.5em 0 .2em}
+p{color:#9aa3af;font-size:.95rem;line-height:1.5}
+</style></head>
+<body><div class="box">
+<img src="/icon-192.png" alt="">
+<h1>One step left</h1>
+<p>MyList has no PIN yet, so the public link stays closed.
+Open this page from your home network - the Pi's home
+address - and set a PIN at the bottom of the page.</p>
+</div></body></html>"""
+
+MSG_PAGE = r"""<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0e1013">
+<title>MyList</title>
+<style>
+body{margin:0;background:#0e1013;color:#f2f3f5;
+font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.box{max-width:340px;margin:14vh auto 0;padding:0 16px;
+text-align:center}
+p{line-height:1.5}
+a{color:#ffd100}
+</style></head>
+<body><div class="box">
+<p>%MSG%</p>
+<p><a href="/">Back to MyList</a></p>
+</div></body></html>"""
+
+
+def pin_section_html():
+    if pin_is_set():
+        state = "PIN lock: on"
+        note = ("The public link asks for this PIN. Home Wi-Fi "
+                "and the CloudStream plugin skip it.")
+        btn = "Change PIN"
+    else:
+        state = "PIN lock: off"
+        note = ("No PIN yet - anyone with the public link can "
+                "see and change your list. Set one now.")
+        btn = "Set PIN"
+    return (
+        '<details class="pinsec"><summary>' + state + "</summary>"
+        "<p>" + note + "</p>"
+        '<form method="post" action="/setpin">'
+        '<input type="password" name="pin" inputmode="numeric" '
+        'pattern="[0-9]*" autocomplete="off" '
+        'placeholder="New PIN (4-8 digits)">'
+        '<input type="password" name="pin2" inputmode="numeric" '
+        'pattern="[0-9]*" autocomplete="off" '
+        'placeholder="Repeat the PIN">'
+        '<button type="submit">' + btn + "</button>"
+        "</form></details>"
+    )
+
+
 # ---------------------------------------------------------------
 # HTTP handler
 # ---------------------------------------------------------------
 
 class Handler(BaseHTTPRequestHandler):
-    def _send(self, body, ctype="text/html; charset=utf-8", code=200):
+    def _send(self, body, ctype="text/html; charset=utf-8",
+              code=200, headers=None):
         if isinstance(body, str):
             body = body.encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
     def _json(self, obj, code=200):
         self._send(json.dumps(obj), "application/json", code)
 
+    def _cookie_ok(self):
+        want = auth_cookie_value()
+        if not want:
+            return False
+        cookies = self.headers.get("Cookie") or ""
+        for part in cookies.split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == "ml_auth" and \
+                    hmac.compare_digest(value, want):
+                return True
+        return False
+
+    def _authed(self):
+        if is_trusted(self.client_address[0]):
+            return True
+        tok = self.headers.get("X-App-Token") or ""
+        real = app_token()
+        if real and tok and hmac.compare_digest(tok, real):
+            return True
+        return self._cookie_ok()
+
+    def _gate(self, api=False):
+        """True when the request may proceed; otherwise the
+        gate response has already been sent."""
+        if self._authed():
+            return True
+        if api:
+            self._json({"ok": False, "error": "PIN required"}, 401)
+        elif pin_is_set():
+            self._send(PIN_PAGE.replace("%ERROR%", ""))
+        else:
+            self._send(SETUP_PAGE, code=403)
+        return False
+
+    def _redirect_home(self, with_cookie=False):
+        headers = {"Location": "/"}
+        if with_cookie:
+            value = auth_cookie_value()
+            if value:
+                headers["Set-Cookie"] = (
+                    "ml_auth=" + value + "; Path=/; "
+                    "Max-Age=7776000; HttpOnly; SameSite=Lax")
+        self._send("", code=303, headers=headers)
+
+    def _unlock(self, form):
+        ip = self.client_address[0]
+        if unlock_blocked(ip):
+            self._send(PIN_PAGE.replace(
+                "%ERROR%",
+                "Too many wrong tries - wait a few minutes."))
+            return
+        pin = (form.get("pin") or [""])[0].strip()
+        if check_pin(pin):
+            clear_unlock_fails(ip)
+            self._redirect_home(with_cookie=True)
+        else:
+            note_unlock_fail(ip)
+            self._send(PIN_PAGE.replace("%ERROR%", "Wrong PIN."))
+
+    def _setpin(self, form):
+        ip = self.client_address[0]
+        if not pin_is_set() and not is_trusted(ip):
+            self._send(SETUP_PAGE, code=403)
+            return
+        if pin_is_set() and not (is_trusted(ip) or
+                                 self._cookie_ok()):
+            self._json({"ok": False, "error": "PIN required"}, 401)
+            return
+        pin = (form.get("pin") or [""])[0].strip()
+        pin2 = (form.get("pin2") or [""])[0].strip()
+        if not valid_pin_format(pin):
+            self._send(MSG_PAGE.replace(
+                "%MSG%", "The PIN must be 4 to 8 digits."),
+                code=400)
+            return
+        if pin != pin2:
+            self._send(MSG_PAGE.replace(
+                "%MSG%",
+                "The two PINs did not match - nothing changed."),
+                code=400)
+            return
+        set_pin(pin)
+        self._redirect_home(with_cookie=True)
+
     def do_GET(self):
         path = self.path.split("?")[0]
-        if path == "/list.txt":
-            text = "\n".join(load_links())
-            self._send(text + ("\n" if text else ""),
-                       "text/plain; charset=utf-8")
-            return
-        if path == "/list.json":
-            items = []
-            for e in load_links():
-                url, _, poster, category = split_entry(e)
-                items.append({"url": url, "title": display_title(e),
-                              "poster": poster, "category": category})
-            self._json(items)
-            return
         if path == "/manifest.webmanifest":
             self._send(MANIFEST, "application/manifest+json")
             return
@@ -609,12 +918,40 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/sw.js":
             self._send(SW, "text/javascript")
             return
-        self._send(PAGE)
+        if path == "/list.txt":
+            if not self._gate(api=True):
+                return
+            text = "\n".join(load_links())
+            self._send(text + ("\n" if text else ""),
+                       "text/plain; charset=utf-8")
+            return
+        if path == "/list.json":
+            if not self._gate(api=True):
+                return
+            items = []
+            for e in load_links():
+                url, _, poster, category = split_entry(e)
+                items.append({"url": url, "title": display_title(e),
+                              "poster": poster, "category": category})
+            self._json(items)
+            return
+        if not self._gate():
+            return
+        self._send(PAGE.replace("<!--PINSECTION-->",
+                                pin_section_html()))
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         form = parse_qs(self.rfile.read(length).decode("utf-8"))
         path = self.path.split("?")[0]
+        if path == "/unlock":
+            self._unlock(form)
+            return
+        if path == "/setpin":
+            self._setpin(form)
+            return
+        if not self._gate(api=True):
+            return
         links = load_links()
         if path == "/add":
             url = (form.get("url") or [""])[0].strip()
