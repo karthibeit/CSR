@@ -1,8 +1,8 @@
 {
   "name": "Karthi's Extensions",
-  "description": "Personal CloudStream extensions: 1TamilMV (OTM), TamilMV (TML), 4KHUB, TamilDhool (TDL), TamilGun (TGN), CastleTV (CTV), Einthusan 1080p (EIN), KMMovies (KM), TamilYogi (TY), XDMovies (XD) and Play4u (P4U). Tamil movies, dubbed movies and serials.",
+  "description": "Personal CloudStream extensions: 1TamilMV (OTM), TamilMV (TML), 4KHUB, TamilDhool (TDL), TamilGun (TGN), CastleTV (CTV), Einthusan 1080p (EIN), KMMovies (KM), TamilYogi (TY), XDMovies (XD), Play4u (P4U) and MyList (MYL). Tamil movies, dubbed movies and serials.",
   "manifestVersion": 1,
   "pluginLists": [
-    "https://cdn.jsdelivr.net/gh/karthibeit/CSR@8f78a6d3cc350013b520650398fbbf266e407bfb/plugins.json"
+    "https://cdn.jsdelivr.net/gh/karthibeit/CSR@245e7d12364dfbe9e4b770efaba5d1903f620369/plugins.json"
   ]
 }
