@@ -1,6 +1,10 @@
 package com.myl
 
 import android.util.Base64
+import com.fasterxml.jackson.annotation.JsonProperty
+import com.fasterxml.jackson.databind.DeserializationFeature
+import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import com.fasterxml.jackson.module.kotlin.readValue
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -13,6 +17,7 @@ import kotlinx.coroutines.coroutineScope
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLDecoder
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * MYL — MyList. Karthi's own link list, served by a tiny server on
@@ -39,6 +44,13 @@ import java.net.URLDecoder
  * a HubCloud page comes back as a Cloudflare check (possible on
  * flagged VPN addresses) resolution stops with diagnostics instead
  * of links — the diag lines say so.
+ *
+ * Posters: the entries are bare addresses with no artwork, so
+ * cards and detail pages look a poster up by cleaned title +
+ * year against IMDb's keyless suggestion data (strict exact
+ * match only — no poster beats a wrong movie's poster). Entries
+ * whose stored title is a host's generic page title (a GoFile
+ * share's, for instance) simply get no poster.
  */
 class MYLProvider : MainAPI() {
     override var mainUrl = "http://192.168.5.177:8765"
@@ -125,8 +137,86 @@ class MYLProvider : MainAPI() {
         else -> Qualities.Unknown.value
     }
 
-    private fun cardOf(title: String, url: String): SearchResponse {
+    private val jsonMapper = jacksonObjectMapper().apply {
+        configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+    }
+
+    private val posterCache = ConcurrentHashMap<String, String>()
+
+    private fun normTitle(s: String): String =
+        s.lowercase().replace(Regex("""[^a-z0-9]+"""), " ")
+            .replace(Regex("""\s+"""), " ").trim()
+
+    /**
+     * "Ranabaali.2026.2160p.NF.WEB-DL.DDP5.1..." -> "ranabaali":
+     * the lookup form of a stored title. Words are kept until the
+     * year or the first quality/codec/site token.
+     */
+    private fun lookupTitle(raw: String): String {
+        var t = raw.replace(
+            Regex("""\.(mkv|mp4|avi|mov|webm)$""", RegexOption.IGNORE_CASE),
+            ""
+        )
+        t = t.replace(Regex("""[\[\(\{][^\]\)\}]*[\]\)\}]"""), " ")
+            .replace(Regex("""[._\-]+"""), " ")
+        val junk = setOf(
+            "2160p", "1080p", "720p", "480p", "360p", "4k", "uhd",
+            "bluray", "webdl", "webrip", "hdrip", "x264", "x265",
+            "h264", "h265", "hevc", "aac", "ddp5", "atmos", "esub",
+            "esubs", "nf", "amzn", "multi", "audio", "dubbed",
+            "tamil", "telugu", "hindi", "malayalam", "kannada",
+            "english", "com", "www", "xdmovies", "kmmovies"
+        )
+        val kept = mutableListOf<String>()
+        for (w in t.split(Regex("""\s+"""))) {
+            if (w.isBlank()) continue
+            val lw = w.lowercase()
+            if (Regex("""(?:19|20)\d{2}""").matches(lw)) break
+            if (lw in junk) break
+            kept.add(w)
+        }
+        return normTitle(kept.joinToString(" "))
+    }
+
+    /**
+     * Poster for a title + year from IMDb's keyless suggestion
+     * data (the endpoint the IMDb site search itself uses).
+     * Strict: exact normalized title and, when both years are
+     * known, the same year. Session-cached; failures return null.
+     */
+    private suspend fun posterFor(title: String, year: Int?): String? {
+        val lookup = lookupTitle(title)
+        if (lookup.length < 2) return null
+        val key = lookup + "|" + (year ?: 0)
+        posterCache[key]?.let { return it.ifBlank { null } }
+        var found: String? = null
+        try {
+            val query = lookup.replace(" ", "%20")
+            val resp: ImdbResponse = jsonMapper.readValue(
+                app.get(
+                    "https://v3.sg.media-imdb.com/suggestion/x/$query.json"
+                ).text
+            )
+            found = resp.results?.firstOrNull { e ->
+                e.image?.imageUrl != null &&
+                    (e.qid == null || e.qid == "movie") &&
+                    normTitle(e.title ?: "") == lookup &&
+                    (year == null || e.year == null || e.year == year)
+            }?.image?.imageUrl
+        } catch (e: Exception) {
+            found = null
+        }
+        posterCache[key] = found ?: ""
+        return found
+    }
+
+    private fun cardOf(
+        title: String,
+        url: String,
+        poster: String? = null
+    ): SearchResponse {
         return newMovieSearchResponse(title, url, TvType.Movie) {
+            this.posterUrl = poster
             this.year = yearOf(title)
             this.quality = searchQualityOf(title)
         }
@@ -151,8 +241,15 @@ class MYLProvider : MainAPI() {
                 entries.map { e -> async { titleFor(e) to e.url } }
                     .awaitAll()
             }
-            for ((title, url) in titled) {
-                cards.add(cardOf(title, url))
+            val posters = coroutineScope {
+                titled.map { (title, _) ->
+                    async { posterFor(title, yearOf(title)) }
+                }.awaitAll()
+            }
+            for ((index, pair) in titled.withIndex()) {
+                cards.add(
+                    cardOf(pair.first, pair.second, posters.getOrNull(index))
+                )
             }
         }
         return newHomePageResponse(request, cards, hasNext = false)
@@ -166,11 +263,17 @@ class MYLProvider : MainAPI() {
         val titled = coroutineScope {
             entries.map { e -> async { titleFor(e) to e.url } }.awaitAll()
         }
-        return titled
-            .filter { (title, _) ->
-                tokens.all { title.lowercase().contains(it) }
-            }
-            .map { (title, url) -> cardOf(title, url) }
+        val matched = titled.filter { (title, _) ->
+            tokens.all { title.lowercase().contains(it) }
+        }
+        val posters = coroutineScope {
+            matched.map { (title, _) ->
+                async { posterFor(title, yearOf(title)) }
+            }.awaitAll()
+        }
+        return matched.mapIndexed { index, (title, url) ->
+            cardOf(title, url, posters.getOrNull(index))
+        }
     }
 
     // ------------------------------------------------------------------
@@ -199,7 +302,9 @@ class MYLProvider : MainAPI() {
             }
         }
         val title = titleFor(Entry(url, null))
+        val poster = posterFor(title, yearOf(title))
         return newMovieLoadResponse(title, url, TvType.Movie, url) {
+            this.posterUrl = poster
             this.plot = "Your pasted link:\n$url"
             this.year = yearOf(title)
         }
@@ -533,3 +638,18 @@ class MYLProvider : MainAPI() {
         return true
     }
 }
+
+private data class ImdbImage(
+    @JsonProperty("imageUrl") val imageUrl: String? = null
+)
+
+private data class ImdbEntry(
+    @JsonProperty("l") val title: String? = null,
+    @JsonProperty("y") val year: Int? = null,
+    @JsonProperty("qid") val qid: String? = null,
+    @JsonProperty("i") val image: ImdbImage? = null
+)
+
+private data class ImdbResponse(
+    @JsonProperty("d") val results: List<ImdbEntry>? = null
+)
