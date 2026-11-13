@@ -32,9 +32,11 @@ import java.net.URLDecoder
  * server buttons: FSL, S3, Mega, 10Gbps, BuzzServer, Pixel, Watch
  * Online — the flow ported from the 4KHUB plugin and verified live
  * on 2026-11-12); HubDrive pages hand over to their HubCloud drive
- * address; Pixeldrain and direct file addresses are emitted as-is;
- * anything else goes to the app's built-in extractors. When a
- * HubCloud page comes back as a Cloudflare check (possible on
+ * address; GoFile shares are resolved through a browser view
+ * (MylGf) because GoFile's API refuses guest accounts while its
+ * web page works; Pixeldrain and direct file addresses are emitted
+ * as-is; anything else goes to the app's built-in extractors. When
+ * a HubCloud page comes back as a Cloudflare check (possible on
  * flagged VPN addresses) resolution stops with diagnostics instead
  * of links — the diag lines say so.
  */
@@ -418,6 +420,41 @@ class MYLProvider : MainAPI() {
                     )
                     if (emitted == 0) {
                         loadExtractor(data, data, subtitleCallback, counting)
+                    }
+                }
+                data.contains("gofile.io", ignoreCase = true) -> {
+                    try {
+                        val cap = MylGf.capture(data, diag)
+                        if (cap != null) {
+                            counting.invoke(
+                                newExtractorLink(
+                                    name,
+                                    "GoFile" + if (cap.filename.isNotBlank()) {
+                                        " · " + cap.filename
+                                    } else {
+                                        ""
+                                    },
+                                    cap.url,
+                                    ExtractorLinkType.VIDEO
+                                ) {
+                                    this.quality = qualityValueOf(
+                                        cap.filename.ifBlank { data }
+                                    )
+                                    this.referer = data
+                                    if (cap.cookie.isNotBlank()) {
+                                        this.headers = mapOf(
+                                            "Cookie" to cap.cookie
+                                        )
+                                    }
+                                }
+                            )
+                        } else {
+                            loadExtractor(
+                                data, data, subtitleCallback, counting
+                            )
+                        }
+                    } finally {
+                        MylGf.endSession()
                     }
                 }
                 data.contains("hubdrive", ignoreCase = true) -> {
