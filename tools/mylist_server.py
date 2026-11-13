@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MyList server v4 — runs on Karthi's Raspberry Pi.
+"""MyList server v5 — runs on Karthi's Raspberry Pi.
 
 Serves a phone-friendly web app (home-screen icon, manifest) for
 adding links, VERIFIES each pasted link before it joins the list
@@ -11,7 +11,9 @@ only), backfills posters for older entries at startup, and serves
 the plain-text list the MyList CloudStream plugin reads.
 Each entry also carries a CATEGORY (movie / dubbed / series /
 english) picked when the link is added and changeable on the web
-page; the plugin shows one home row per category.
+page; the plugin shows one home row per category. The page
+itself was redesigned in v5: card layout, posters, grouped
+by category, quality chips.
 Data file: links.txt next to this script, one entry per line —
 address|title|poster|category (trailing fields may be omitted).
 """
@@ -309,8 +311,8 @@ MANIFEST = json.dumps({
     "start_url": "/",
     "scope": "/",
     "display": "standalone",
-    "background_color": "#181a20",
-    "theme_color": "#181a20",
+    "background_color": "#0e1013",
+    "theme_color": "#0e1013",
     "icons": [
         {"src": "/icon-192.png", "sizes": "192x192",
          "type": "image/png"},
@@ -320,7 +322,7 @@ MANIFEST = json.dumps({
 })
 
 SW = (
-    "const C='mylist-v4';"
+    "const C='mylist-v5';"
     "self.addEventListener('install',e=>{e.waitUntil("
     "caches.open(C).then(c=>c.addAll(['/',"
     "'/manifest.webmanifest','/icon-192.png','/icon-512.png']))"
@@ -331,10 +333,10 @@ SW = (
     "caches.match(e.request)))});"
 )
 
-PAGE = """<!doctype html>
+PAGE = r"""<!doctype html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#181a20">
+<meta name="theme-color" content="#0e1013">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black">
@@ -342,76 +344,175 @@ PAGE = """<!doctype html>
 <link rel="icon" href="/icon-192.png">
 <title>MyList</title>
 <style>
-body{font-family:sans-serif;background:#181a20;color:#eee;
-margin:0 auto;max-width:640px;padding:1em}
-h2{margin:.2em 0 .6em}
-input[type=url]{width:100%;padding:.7em;font-size:1em;box-sizing:border-box;
-border-radius:.5em;border:1px solid #444;background:#22242c;color:#eee}
-button{padding:.6em 1.1em;font-size:1em;border:0;border-radius:.5em;
-background:#ffd100;color:#111;font-weight:bold}
-button.rm{background:#33363f;color:#eee;font-weight:normal;
-padding:.35em .8em;font-size:.9em}
-select{padding:.4em;font-size:.95em;border-radius:.5em;
-border:1px solid #444;background:#22242c;color:#eee}
-#status{margin:.8em 0;min-height:1.2em}
+:root{--bg:#0e1013;--card:#1a1d23;--card2:#22252d;--line:#2b2f38;
+--txt:#f2f3f5;--mut:#9aa3af;--dim:#6f7683;--acc:#ffd100;--ink:#161616}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);
+font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+-webkit-font-smoothing:antialiased}
+.wrap{max-width:680px;margin:0 auto;padding:0 14px 30px}
+.top{display:flex;align-items:center;gap:10px;padding:18px 2px 12px}
+.top img{width:34px;height:34px;border-radius:9px}
+.top h1{font-size:1.35rem;margin:0;font-weight:700}
+.pill{margin-left:auto;background:var(--card2);color:var(--mut);
+border:1px solid var(--line);padding:.28em .75em;border-radius:999px;
+font-size:.85rem}
+.addcard{background:var(--card);border:1px solid var(--line);
+border-radius:16px;padding:14px;box-shadow:0 8px 22px rgba(0,0,0,.35)}
+input[type=url]{width:100%;padding:.8em .9em;font-size:1rem;
+border-radius:12px;border:1px solid var(--line);
+background:#101216;color:var(--txt)}
+input[type=url]::placeholder{color:#5f6672}
+input[type=url]:focus{outline:2px solid var(--acc);
+border-color:transparent}
+.row{display:flex;gap:10px;margin-top:10px}
+select{border:1px solid var(--line);background:var(--card2);
+color:var(--txt);border-radius:12px;padding:.68em .7em;font-size:.95rem}
+.row select{flex:1;min-width:0}
+#addbtn{flex:0 0 auto;background:var(--acc);color:var(--ink);
+font-weight:700;border:0;border-radius:12px;padding:.68em 1.25em;
+font-size:1rem}
+#addbtn:disabled{opacity:.55}
+#status{margin:12px 2px 0;font-size:.95rem;min-height:1.15em}
 .ok{color:#7dd87d}.bad{color:#ff8080}
-li{margin:.7em 0;word-break:break-all}
-small{color:#999}
+.sec{display:flex;align-items:baseline;gap:8px;margin:24px 2px 10px}
+.sec h2{font-size:1.02rem;margin:0;font-weight:700}
+.sec span{color:var(--mut);font-size:.85rem}
+.list{display:flex;flex-direction:column;gap:10px}
+.item{display:flex;gap:12px;background:var(--card);
+border:1px solid var(--line);border-radius:16px;padding:10px}
+.poster{width:52px;height:78px;border-radius:10px;object-fit:cover;
+flex:0 0 auto;background:#0b0d10}
+.noposter{display:flex;align-items:center;justify-content:center;
+color:var(--acc);font-size:1.25rem;
+background:linear-gradient(160deg,#262a33,#131519)}
+.main{flex:1;min-width:0}
+.ttl{font-weight:600;font-size:.97rem;line-height:1.35;
+display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+overflow:hidden;word-break:break-word}
+.meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.chip{background:var(--card2);border:1px solid var(--line);
+color:var(--mut);font-size:.72rem;padding:.16em .55em;
+border-radius:999px}
+.url{color:var(--dim);font-size:.75rem;margin-top:6px;
+white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ctrl{display:flex;gap:8px;margin-top:10px}
+.ctrl select{flex:1;min-width:0;border-radius:10px;
+padding:.5em .6em;font-size:.9rem}
+.rm{background:transparent;border:1px solid #54302e;color:#ff8f8f;
+border-radius:10px;padding:.5em .95em;font-size:.9rem;font-weight:600}
+.rm:active{background:#38211f}
+.empty{color:var(--mut);text-align:center;padding:28px 12px;
+border:1px dashed var(--line);border-radius:16px;margin-top:14px}
 </style></head>
 <body>
-<h2>MyList</h2>
-<form id="addform">
+<div class="wrap">
+<div class="top"><img src="/icon-192.png" alt="">
+<h1>MyList</h1><div class="pill"><span id="count">0</span> links</div></div>
+<form id="addform" class="addcard">
 <input type="url" id="url" placeholder="Paste a HubCloud or video link" required>
-<p><label>Category:
+<div class="row">
 <select id="cat">
 <option value="movie">Movies</option>
 <option value="dubbed">Dubbed</option>
 <option value="series">Web Series</option>
 <option value="english">English</option>
-</select></label></p>
-<p><button type="submit" id="addbtn">Verify &amp; Add</button></p>
+</select>
+<button type="submit" id="addbtn">Verify &amp; Add</button>
+</div>
 </form>
 <div id="status"></div>
-<h3>Your list (<span id="count">0</span>)</h3>
-<ul id="list"></ul>
+<div id="list"></div>
+</div>
 <script>
-function esc(s){return s.replace(/&/g,"&amp;").replace(/</g,"&lt;")}
+function esc(s){return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;")}
 function setStatus(msg, ok){
   var el=document.getElementById("status");
   el.innerHTML=msg; el.className=ok?"ok":"bad";
 }
+function pretty(t){
+  return (t||"").replace(/\.(mkv|mp4|avi|mov|webm)$/i,"")
+    .replace(/[._]+/g," ").replace(/\s+/g," ").trim();
+}
+function chips(t){
+  var out=[]; t=t||"";
+  var y=t.match(/(?:19|20)\d{2}/); if(y) out.push(y[0]);
+  var q=t.match(/2160p|1080p|720p|480p|360p/i);
+  if(q) out.push(q[0].toUpperCase());
+  if(/h\.?265|hevc/i.test(t)) out.push("H.265");
+  else if(/h\.?264/i.test(t)) out.push("H.264");
+  return out;
+}
+function card(it, i){
+  var d=document.createElement("div"); d.className="item";
+  if(it.poster){
+    var im=document.createElement("img");
+    im.className="poster"; im.src=it.poster; im.alt="";
+    im.loading="lazy"; d.appendChild(im);
+  } else {
+    var ph=document.createElement("div");
+    ph.className="poster noposter"; ph.textContent="\u25B6";
+    d.appendChild(ph);
+  }
+  var main=document.createElement("div"); main.className="main";
+  var ttl=document.createElement("div"); ttl.className="ttl";
+  ttl.textContent=pretty(it.title); ttl.title=it.title;
+  main.appendChild(ttl);
+  var cs=chips(it.title);
+  if(cs.length){
+    var meta=document.createElement("div"); meta.className="meta";
+    cs.forEach(function(c){
+      var s=document.createElement("span"); s.className="chip";
+      s.textContent=c; meta.appendChild(s);
+    });
+    main.appendChild(meta);
+  }
+  var u=document.createElement("div"); u.className="url";
+  u.textContent=it.url; main.appendChild(u);
+  var ctrl=document.createElement("div"); ctrl.className="ctrl";
+  var sel=document.createElement("select");
+  [["movie","Movies"],["dubbed","Dubbed"],
+   ["series","Web Series"],["english","English"]].forEach(function(c){
+    var o=document.createElement("option");
+    o.value=c[0]; o.textContent=c[1];
+    if(it.category===c[0]) o.selected=true;
+    sel.appendChild(o);
+  });
+  sel.onchange=function(){ categorize(i, sel.value); };
+  ctrl.appendChild(sel);
+  var b=document.createElement("button");
+  b.className="rm"; b.textContent="Remove";
+  b.onclick=function(){ del(i); };
+  ctrl.appendChild(b);
+  main.appendChild(ctrl);
+  d.appendChild(main);
+  return d;
+}
 function render(items){
   document.getElementById("count").textContent=items.length;
-  var ul=document.getElementById("list"); ul.innerHTML="";
-  items.forEach(function(it, i){
-    var li=document.createElement("li");
-    if(it.poster){
-      var im=document.createElement("img");
-      im.src=it.poster;
-      im.style.cssText="width:40px;height:60px;object-fit:cover;" +
-        "border-radius:.3em;vertical-align:middle;margin-right:.5em";
-      li.appendChild(im);
-    }
-    li.innerHTML+=esc(it.title)+" ";
-    var b=document.createElement("button");
-    b.textContent="Remove"; b.className="rm";
-    b.onclick=function(){ del(i); };
-    li.appendChild(b);
-    var cats=[["movie","Movies"],["dubbed","Dubbed"],
-      ["series","Web Series"],["english","English"]];
-    var sel=document.createElement("select");
-    cats.forEach(function(c){
-      var o=document.createElement("option");
-      o.value=c[0]; o.textContent=c[1];
-      if(it.category===c[0]) o.selected=true;
-      sel.appendChild(o);
+  var host=document.getElementById("list"); host.innerHTML="";
+  if(!items.length){
+    var e=document.createElement("div"); e.className="empty";
+    e.textContent="Your list is empty - paste a link above " +
+      "to add the first one.";
+    host.appendChild(e); return;
+  }
+  [["movie","Movies"],["dubbed","Dubbed"],
+   ["series","Web Series"],["english","English"]].forEach(function(g){
+    var mine=[];
+    items.forEach(function(it, i){
+      if((it.category||"movie")===g[0]) mine.push([it, i]);
     });
-    sel.onchange=function(){ categorize(i, sel.value); };
-    li.appendChild(sel);
-    var sm=document.createElement("small");
-    sm.innerHTML="<br>"+esc(it.url);
-    li.appendChild(sm);
-    ul.appendChild(li);
+    if(!mine.length) return;
+    var sec=document.createElement("div"); sec.className="sec";
+    var h=document.createElement("h2"); h.textContent=g[1];
+    sec.appendChild(h);
+    var n=document.createElement("span");
+    n.textContent=mine.length; sec.appendChild(n);
+    host.appendChild(sec);
+    var list=document.createElement("div"); list.className="list";
+    mine.forEach(function(pair){ list.appendChild(card(pair[0], pair[1])); });
+    host.appendChild(list);
   });
 }
 function refresh(){
@@ -445,7 +546,7 @@ function(ev){
   .then(function(res){
     btn.disabled=false;
     if(res.ok){
-      setStatus("Added: "+esc(res.title), true);
+      setStatus("Added: "+esc(pretty(res.title)), true);
       document.getElementById("url").value="";
     } else {
       setStatus("Not added: "+esc(res.error||"unknown error"), false);
