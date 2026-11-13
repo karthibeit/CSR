@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
-"""MyList server v2 — runs on Karthi's Raspberry Pi.
+"""MyList server v3 — runs on Karthi's Raspberry Pi.
 
 Serves a phone-friendly web app (home-screen icon, manifest) for
 adding links, VERIFIES each pasted link before it joins the list
 (HubCloud drive pages must load with a download button, Pixeldrain
 files must exist, direct files must answer, other pages must load),
-and serves the plain-text list the MyList CloudStream plugin reads.
+fetches the movie's POSTER when a link is added (title + year
+lookup against IMDb's keyless suggestion data, strict exact match
+only), backfills posters for older entries at startup, and serves
+the plain-text list the MyList CloudStream plugin reads.
 Data file: links.txt next to this script, one entry per line —
-a bare address, or address|title.
+address, or address|title, or address|title|poster.
 """
 import html
 import json
 import os
 import re
 import struct
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -53,16 +57,124 @@ def save_links(links):
 
 
 def split_entry(entry):
-    url, _, title = entry.partition("|")
-    return url.strip(), title.strip()
+    parts = entry.split("|")
+    url = parts[0].strip()
+    title = parts[1].strip() if len(parts) > 1 else ""
+    poster = parts[2].strip() if len(parts) > 2 else ""
+    return url, title, poster
+
+
+def join_entry(url, title, poster):
+    parts = [url, title or "", poster or ""]
+    while len(parts) > 1 and not parts[-1]:
+        parts.pop()
+    return "|".join(parts)
 
 
 def display_title(entry):
-    url, title = split_entry(entry)
+    url, title, _ = split_entry(entry)
     if title:
         return title
     tail = unquote(url.split("?")[0].rstrip("/").rsplit("/", 1)[-1])
     return tail or url
+
+
+# ---------------------------------------------------------------
+# Poster lookup (IMDb suggestion data, strict exact match)
+# ---------------------------------------------------------------
+
+JUNK_TOKENS = {
+    "2160p", "1080p", "720p", "480p", "360p", "4k", "uhd",
+    "bluray", "webdl", "webrip", "hdrip", "x264", "x265",
+    "h264", "h265", "hevc", "aac", "ddp5", "atmos", "esub",
+    "esubs", "nf", "amzn", "multi", "audio", "dubbed",
+    "tamil", "telugu", "hindi", "malayalam", "kannada",
+    "english", "com", "www", "xdmovies", "kmmovies",
+}
+
+
+def norm_title(s):
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ",
+                                      s.lower())).strip()
+
+
+def lookup_title(raw):
+    t = re.sub(r"\.(mkv|mp4|avi|mov|webm)$", "", raw, flags=re.I)
+    t = re.sub(r"[\[\({][^\]\)\}]*[\]\)\}]", " ", t)
+    t = re.sub(r"[._\-]+", " ", t)
+    kept = []
+    for w in t.split():
+        lw = w.lower()
+        if re.fullmatch(r"(?:19|20)\d{2}", lw):
+            break
+        if lw in JUNK_TOKENS:
+            break
+        kept.append(w)
+    return norm_title(" ".join(kept))
+
+
+def year_of(raw):
+    m = re.search(r"(?:19|20)\d{2}", raw)
+    return int(m.group(0)) if m else None
+
+
+def fetch_poster(title):
+    """Poster URL for a display title, or "" — strict exact
+    title + year match against IMDb's suggestion data; any
+    failure simply means no poster."""
+    try:
+        lookup = lookup_title(title or "")
+        if len(lookup) < 2:
+            return ""
+        year = year_of(title or "")
+        url = ("https://v3.sg.media-imdb.com/suggestion/x/" +
+               lookup.replace(" ", "%20") + ".json")
+        req = urllib.request.Request(url, headers=dict(UA))
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+        for e in data.get("d", []):
+            img = (e.get("i") or {}).get("imageUrl")
+            if not img:
+                continue
+            if e.get("qid") not in (None, "movie"):
+                continue
+            if norm_title(e.get("l", "")) != lookup:
+                continue
+            if year is not None and e.get("y") not in (None, year):
+                continue
+            return img
+    except Exception:
+        pass
+    return ""
+
+
+def backfill_posters():
+    """Fill in posters for entries that lack one (runs in a
+    background thread at startup; merges by address so it
+    cannot clobber adds/deletes that happen meanwhile)."""
+    try:
+        wanted = {}
+        for e in load_links():
+            url, title, poster = split_entry(e)
+            if not poster:
+                p = fetch_poster(display_title(e))
+                if p:
+                    wanted[url] = p
+        if not wanted:
+            return
+        links = load_links()
+        changed = False
+        out = []
+        for e in links:
+            url, title, poster = split_entry(e)
+            if not poster and url in wanted:
+                e = join_entry(url, title, wanted[url])
+                changed = True
+            out.append(e)
+        if changed:
+            save_links(out)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------
@@ -194,7 +306,7 @@ MANIFEST = json.dumps({
 })
 
 SW = (
-    "const C='mylist-v2';"
+    "const C='mylist-v3';"
     "self.addEventListener('install',e=>{e.waitUntil("
     "caches.open(C).then(c=>c.addAll(['/',"
     "'/manifest.webmanifest','/icon-192.png','/icon-512.png']))"
@@ -250,7 +362,14 @@ function render(items){
   var ul=document.getElementById("list"); ul.innerHTML="";
   items.forEach(function(it, i){
     var li=document.createElement("li");
-    li.innerHTML=esc(it.title)+" ";
+    if(it.poster){
+      var im=document.createElement("img");
+      im.src=it.poster;
+      im.style.cssText="width:40px;height:60px;object-fit:cover;" +
+        "border-radius:.3em;vertical-align:middle;margin-right:.5em";
+      li.appendChild(im);
+    }
+    li.innerHTML+=esc(it.title)+" ";
     var b=document.createElement("button");
     b.textContent="Remove"; b.className="rm";
     b.onclick=function(){ del(i); };
@@ -330,8 +449,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/list.json":
             items = []
             for e in load_links():
-                url, _ = split_entry(e)
-                items.append({"url": url, "title": display_title(e)})
+                url, _, poster = split_entry(e)
+                items.append({"url": url, "title": display_title(e),
+                              "poster": poster})
             self._json(items)
             return
         if path == "/manifest.webmanifest":
@@ -369,10 +489,12 @@ class Handler(BaseHTTPRequestHandler):
             if error:
                 self._json({"ok": False, "error": error}, 422)
                 return
-            links.append(url + ("|" + title if title else ""))
+            poster = fetch_poster(title or display_title(url))
+            links.append(join_entry(url, title, poster))
             save_links(links)
             self._json({"ok": True,
-                        "title": title or display_title(url)})
+                        "title": title or display_title(url),
+                        "poster": poster})
             return
         if path == "/delete":
             try:
@@ -391,4 +513,5 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    threading.Thread(target=backfill_posters, daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
