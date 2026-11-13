@@ -45,12 +45,14 @@ import java.util.concurrent.ConcurrentHashMap
  * flagged VPN addresses) resolution stops with diagnostics instead
  * of links — the diag lines say so.
  *
- * Posters: the entries are bare addresses with no artwork, so
- * cards and detail pages look a poster up by cleaned title +
- * year against IMDb's keyless suggestion data (strict exact
- * match only — no poster beats a wrong movie's poster). Entries
- * whose stored title is a host's generic page title (a GoFile
- * share's, for instance) simply get no poster.
+ * Posters: the Pi fetches each movie's poster (title + year
+ * lookup against IMDb's keyless suggestion data, strict exact
+ * match) when the link is added and stores it as the entry's
+ * third field, so cards and detail pages use the stored poster.
+ * Entries without one (added before posters existed, or no
+ * match) fall back to the same lookup here in the plugin.
+ * Entries whose stored title is a host's generic page title (a
+ * GoFile share's, for instance) simply get no poster.
  */
 class MYLProvider : MainAPI() {
     override var mainUrl = "http://192.168.5.177:8765"
@@ -67,7 +69,11 @@ class MYLProvider : MainAPI() {
     private val addUrl = "$mainUrl/__add__"
     private val infoUrl = "$mainUrl/__info__"
 
-    private data class Entry(val url: String, val storedTitle: String?)
+    private data class Entry(
+        val url: String,
+        val storedTitle: String?,
+        val poster: String? = null
+    )
 
     // ------------------------------------------------------------------
     // The Pi list
@@ -80,10 +86,12 @@ class MYLProvider : MainAPI() {
                 .map { it.trim() }
                 .filter { it.isNotBlank() && !it.startsWith("#") }
                 .map { line ->
-                    val parts = line.split("|", limit = 2)
+                    val parts = line.split("|")
                     Entry(
                         parts[0].trim(),
                         parts.getOrNull(1)?.trim()
+                            ?.takeIf { it.isNotBlank() },
+                        parts.getOrNull(2)?.trim()
                             ?.takeIf { it.isNotBlank() }
                     )
                 }
@@ -238,17 +246,21 @@ class MYLProvider : MainAPI() {
             )
         } else {
             val titled = coroutineScope {
-                entries.map { e -> async { titleFor(e) to e.url } }
-                    .awaitAll()
-            }
-            val posters = coroutineScope {
-                titled.map { (title, _) ->
-                    async { posterFor(title, yearOf(title)) }
+                entries.map { e ->
+                    async { Triple(titleFor(e), e.url, e.poster) }
                 }.awaitAll()
             }
-            for ((index, pair) in titled.withIndex()) {
+            val posters = coroutineScope {
+                titled.map { (title, _, stored) ->
+                    async { stored ?: posterFor(title, yearOf(title)) }
+                }.awaitAll()
+            }
+            for ((index, triple) in titled.withIndex()) {
                 cards.add(
-                    cardOf(pair.first, pair.second, posters.getOrNull(index))
+                    cardOf(
+                        triple.first, triple.second,
+                        posters.getOrNull(index)
+                    )
                 )
             }
         }
@@ -261,18 +273,20 @@ class MYLProvider : MainAPI() {
         if (tokens.isEmpty()) return emptyList()
         val entries = fetchEntries() ?: return emptyList()
         val titled = coroutineScope {
-            entries.map { e -> async { titleFor(e) to e.url } }.awaitAll()
+            entries.map { e ->
+                async { Triple(titleFor(e), e.url, e.poster) }
+            }.awaitAll()
         }
-        val matched = titled.filter { (title, _) ->
+        val matched = titled.filter { (title, _, _) ->
             tokens.all { title.lowercase().contains(it) }
         }
         val posters = coroutineScope {
-            matched.map { (title, _) ->
-                async { posterFor(title, yearOf(title)) }
+            matched.map { (title, _, stored) ->
+                async { stored ?: posterFor(title, yearOf(title)) }
             }.awaitAll()
         }
-        return matched.mapIndexed { index, (title, url) ->
-            cardOf(title, url, posters.getOrNull(index))
+        return matched.mapIndexed { index, triple ->
+            cardOf(triple.first, triple.second, posters.getOrNull(index))
         }
     }
 
@@ -301,8 +315,10 @@ class MYLProvider : MainAPI() {
                     "MyList server is running, then reopen MyList."
             }
         }
-        val title = titleFor(Entry(url, null))
-        val poster = posterFor(title, yearOf(title))
+        val entry = fetchEntries()?.firstOrNull { it.url == url }
+            ?: Entry(url, null)
+        val title = titleFor(entry)
+        val poster = entry.poster ?: posterFor(title, yearOf(title))
         return newMovieLoadResponse(title, url, TvType.Movie, url) {
             this.posterUrl = poster
             this.plot = "Your pasted link:\n$url"
