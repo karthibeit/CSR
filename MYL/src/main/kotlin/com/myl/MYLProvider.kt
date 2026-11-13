@@ -21,11 +21,19 @@ import java.util.concurrent.ConcurrentHashMap
 
 /**
  * MYL — MyList. Karthi's own link list, served by a tiny server on
- * his Raspberry Pi at home (mainUrl below): the Pi holds a plain
+ * his Raspberry Pi at home and reached through its public
+ * Tailscale Funnel address (mainUrl below), so the list works
+ * from anywhere, not just home Wi-Fi: the Pi holds a plain
  * text list of addresses he pastes (HubCloud drive links or any
  * other video address) and this plugin shows them as a movie list.
  * Adding works from any browser at the Pi's address, and from the
  * "Add a link" card at the top of the list (MylUi posts to the Pi).
+ *
+ * The Pi's page sits behind a PIN lock for public visitors
+ * (home-network and tailnet requests skip it). This plugin
+ * carries an app token — a random secret stored on the Pi in
+ * app_token.txt — and sends it as a header with every Pi
+ * request, which is the plugin's way through the lock.
  *
  * List format (one entry per line): a bare address, or an address
  * and a title separated by a pipe character. Entries without a
@@ -60,7 +68,7 @@ import java.util.concurrent.ConcurrentHashMap
  * English. Entries without the field are Movies.
  */
 class MYLProvider : MainAPI() {
-    override var mainUrl = "http://192.168.5.177:8765"
+    override var mainUrl = "https://karthi.tail0ec816.ts.net:10000"
     override var name = "MyList"
     override val hasMainPage = true
     override var lang = "en"
@@ -92,16 +100,26 @@ class MYLProvider : MainAPI() {
             val c = raw?.trim()?.lowercase().orEmpty()
             return if (c in CATEGORIES) c else "movie"
         }
+
+        // The plugin's key through the Pi page's PIN lock,
+        // sent with every Pi request. The same value lives in
+        // the Pi's app_token.txt; rotating it there and here
+        // (plus a rebuild) is the way to change it.
+        const val APP_TOKEN = "b88edd43785f5d02f0481b304c82e9c6def3ad0091738b6b"
+
+        val APP_HEADERS = mapOf("X-App-Token" to APP_TOKEN)
     }
 
     // ------------------------------------------------------------------
     // The Pi list
     // ------------------------------------------------------------------
 
-    /** Null when the Pi cannot be reached (off home Wi-Fi, Pi down). */
+    /** Null when the Pi cannot be reached (Pi down, no internet). */
     private suspend fun fetchEntries(): List<Entry>? {
         return try {
-            app.get("$mainUrl/list.txt").text.lines()
+            app.get(
+                "$mainUrl/list.txt", headers = APP_HEADERS
+            ).text.lines()
                 .map { it.trim() }
                 .filter { it.isNotBlank() && !it.startsWith("#") }
                 .map { line ->
@@ -264,7 +282,7 @@ class MYLProvider : MainAPI() {
             if (category == "movie") {
                 cards.add(
                     cardOf(
-                        "⚠ Pi not reachable — open on home Wi-Fi",
+                        "⚠ Pi not reachable — check the Pi is on",
                         infoUrl
                     )
                 )
@@ -331,7 +349,8 @@ class MYLProvider : MainAPI() {
                     "HubCloud (or any video) link and tap Add — it is " +
                     "saved to your Pi's list. Then go back and reopen " +
                     "MyList to see it. You can also add links from any " +
-                    "browser at $mainUrl/ while on home Wi-Fi."
+                    "browser at $mainUrl/ (the page asks for your PIN " +
+                    "unless you are on your home Wi-Fi)."
             }
         }
         if (url == infoUrl) {
@@ -339,9 +358,9 @@ class MYLProvider : MainAPI() {
                 "Pi not reachable", url, TvType.Movie, url
             ) {
                 this.plot = "The plugin could not read the list from " +
-                    "your Raspberry Pi at $mainUrl. Check that this " +
-                    "device is on your home Wi-Fi and that the Pi's " +
-                    "MyList server is running, then reopen MyList."
+                    "your Raspberry Pi at $mainUrl. Check that the Pi " +
+                    "is switched on and this device has internet, " +
+                    "then reopen MyList."
             }
         }
         val entry = fetchEntries()?.firstOrNull { it.url == url }
