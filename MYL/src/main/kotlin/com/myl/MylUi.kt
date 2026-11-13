@@ -97,6 +97,9 @@ object MylUi {
                 "Content-Type",
                 "application/x-www-form-urlencoded"
             )
+            conn.setRequestProperty(
+                "X-App-Token", MYLProvider.APP_TOKEN
+            )
             val body = "url=" + URLEncoder.encode(link, "UTF-8")
             conn.outputStream.use { it.write(body.toByteArray()) }
             val code = conn.responseCode
