@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MyList server v3 — runs on Karthi's Raspberry Pi.
+"""MyList server v4 — runs on Karthi's Raspberry Pi.
 
 Serves a phone-friendly web app (home-screen icon, manifest) for
 adding links, VERIFIES each pasted link before it joins the list
@@ -9,8 +9,11 @@ fetches the movie's POSTER when a link is added (title + year
 lookup against IMDb's keyless suggestion data, strict exact match
 only), backfills posters for older entries at startup, and serves
 the plain-text list the MyList CloudStream plugin reads.
+Each entry also carries a CATEGORY (movie / dubbed / series /
+english) picked when the link is added and changeable on the web
+page; the plugin shows one home row per category.
 Data file: links.txt next to this script, one entry per line —
-address, or address|title, or address|title|poster.
+address|title|poster|category (trailing fields may be omitted).
 """
 import html
 import json
@@ -56,23 +59,34 @@ def save_links(links):
             f.write(line + "\n")
 
 
+CATEGORIES = ("movie", "dubbed", "series", "english")
+
+
+def clean_category(value):
+    v = (value or "").strip().lower()
+    return v if v in CATEGORIES else "movie"
+
+
 def split_entry(entry):
     parts = entry.split("|")
     url = parts[0].strip()
     title = parts[1].strip() if len(parts) > 1 else ""
     poster = parts[2].strip() if len(parts) > 2 else ""
-    return url, title, poster
+    category = clean_category(parts[3]) if len(parts) > 3 else "movie"
+    return url, title, poster, category
 
 
-def join_entry(url, title, poster):
-    parts = [url, title or "", poster or ""]
+def join_entry(url, title, poster, category="movie"):
+    parts = [url, title or "", poster or "", clean_category(category)]
+    if parts[3] == "movie":
+        parts.pop()
     while len(parts) > 1 and not parts[-1]:
         parts.pop()
     return "|".join(parts)
 
 
 def display_title(entry):
-    url, title, _ = split_entry(entry)
+    url, title, _, _ = split_entry(entry)
     if title:
         return title
     tail = unquote(url.split("?")[0].rstrip("/").rsplit("/", 1)[-1])
@@ -155,7 +169,7 @@ def backfill_posters():
     try:
         wanted = {}
         for e in load_links():
-            url, title, poster = split_entry(e)
+            url, title, poster, _ = split_entry(e)
             if not poster:
                 p = fetch_poster(display_title(e))
                 if p:
@@ -166,9 +180,9 @@ def backfill_posters():
         changed = False
         out = []
         for e in links:
-            url, title, poster = split_entry(e)
+            url, title, poster, category = split_entry(e)
             if not poster and url in wanted:
-                e = join_entry(url, title, wanted[url])
+                e = join_entry(url, title, wanted[url], category)
                 changed = True
             out.append(e)
         if changed:
@@ -306,7 +320,7 @@ MANIFEST = json.dumps({
 })
 
 SW = (
-    "const C='mylist-v3';"
+    "const C='mylist-v4';"
     "self.addEventListener('install',e=>{e.waitUntil("
     "caches.open(C).then(c=>c.addAll(['/',"
     "'/manifest.webmanifest','/icon-192.png','/icon-512.png']))"
@@ -337,6 +351,8 @@ button{padding:.6em 1.1em;font-size:1em;border:0;border-radius:.5em;
 background:#ffd100;color:#111;font-weight:bold}
 button.rm{background:#33363f;color:#eee;font-weight:normal;
 padding:.35em .8em;font-size:.9em}
+select{padding:.4em;font-size:.95em;border-radius:.5em;
+border:1px solid #444;background:#22242c;color:#eee}
 #status{margin:.8em 0;min-height:1.2em}
 .ok{color:#7dd87d}.bad{color:#ff8080}
 li{margin:.7em 0;word-break:break-all}
@@ -346,6 +362,13 @@ small{color:#999}
 <h2>MyList</h2>
 <form id="addform">
 <input type="url" id="url" placeholder="Paste a HubCloud or video link" required>
+<p><label>Category:
+<select id="cat">
+<option value="movie">Movies</option>
+<option value="dubbed">Dubbed</option>
+<option value="series">Web Series</option>
+<option value="english">English</option>
+</select></label></p>
 <p><button type="submit" id="addbtn">Verify &amp; Add</button></p>
 </form>
 <div id="status"></div>
@@ -374,6 +397,17 @@ function render(items){
     b.textContent="Remove"; b.className="rm";
     b.onclick=function(){ del(i); };
     li.appendChild(b);
+    var cats=[["movie","Movies"],["dubbed","Dubbed"],
+      ["series","Web Series"],["english","English"]];
+    var sel=document.createElement("select");
+    cats.forEach(function(c){
+      var o=document.createElement("option");
+      o.value=c[0]; o.textContent=c[1];
+      if(it.category===c[0]) o.selected=true;
+      sel.appendChild(o);
+    });
+    sel.onchange=function(){ categorize(i, sel.value); };
+    li.appendChild(sel);
     var sm=document.createElement("small");
     sm.innerHTML="<br>"+esc(it.url);
     li.appendChild(sm);
@@ -389,6 +423,12 @@ function del(i){
     headers:{"Content-Type":"application/x-www-form-urlencoded"},
     body:"index="+i}).then(refresh);
 }
+function categorize(i, cat){
+  fetch("/categorize",{method:"POST",
+    headers:{"Content-Type":"application/x-www-form-urlencoded"},
+    body:"index="+i+"&category="+encodeURIComponent(cat)})
+  .then(refresh);
+}
 document.getElementById("addform").addEventListener("submit",
 function(ev){
   ev.preventDefault();
@@ -398,7 +438,9 @@ function(ev){
   btn.disabled=true; setStatus("Checking the link...", true);
   fetch("/add",{method:"POST",
     headers:{"Content-Type":"application/x-www-form-urlencoded"},
-    body:"url="+encodeURIComponent(u)})
+    body:"url="+encodeURIComponent(u)+
+      "&category="+encodeURIComponent(
+        document.getElementById("cat").value)})
   .then(function(r){return r.json()})
   .then(function(res){
     btn.disabled=false;
@@ -449,9 +491,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/list.json":
             items = []
             for e in load_links():
-                url, _, poster = split_entry(e)
+                url, _, poster, category = split_entry(e)
                 items.append({"url": url, "title": display_title(e),
-                              "poster": poster})
+                              "poster": poster, "category": category})
             self._json(items)
             return
         if path == "/manifest.webmanifest":
@@ -490,11 +532,25 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": False, "error": error}, 422)
                 return
             poster = fetch_poster(title or display_title(url))
-            links.append(join_entry(url, title, poster))
+            category = clean_category((form.get("category") or [""])[0])
+            links.append(join_entry(url, title, poster, category))
             save_links(links)
             self._json({"ok": True,
                         "title": title or display_title(url),
-                        "poster": poster})
+                        "poster": poster, "category": category})
+            return
+        if path == "/categorize":
+            try:
+                idx = int((form.get("index") or ["-1"])[0])
+                category = clean_category(
+                    (form.get("category") or [""])[0])
+                if 0 <= idx < len(links):
+                    url, title, poster, _ = split_entry(links[idx])
+                    links[idx] = join_entry(url, title, poster, category)
+                    save_links(links)
+            except ValueError:
+                pass
+            self._json({"ok": True})
             return
         if path == "/delete":
             try:
