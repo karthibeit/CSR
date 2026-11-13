@@ -3,6 +3,6 @@
   "description": "Personal CloudStream plugins: 1TamilMV, TamilMV, 4KHDHub, TamilDhool, TamilGun, CastleTV, Einthusan 1080p, KMMovies, TamilYogi, XDMovies, Play4u and MyList.",
   "manifestVersion": 1,
   "pluginLists": [
-    "https://cdn.jsdelivr.net/gh/karthibeit/CSR@14e745dbc6632f94e97d13157784f937b089c765/plugins.json"
+    "https://cdn.jsdelivr.net/gh/karthibeit/CSR@80f257bd036f6f5224a247840a4f622daf6caadf/plugins.json"
   ]
 }
