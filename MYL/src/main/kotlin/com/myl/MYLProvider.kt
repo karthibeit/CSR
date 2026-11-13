@@ -53,6 +53,11 @@ import java.util.concurrent.ConcurrentHashMap
  * match) fall back to the same lookup here in the plugin.
  * Entries whose stored title is a host's generic page title (a
  * GoFile share's, for instance) simply get no poster.
+ *
+ * Categories: each entry's fourth field (picked on the Pi page
+ * when the link is added, changeable there later) sorts it into
+ * one of the four home rows — Movies, Dubbed, Web Series,
+ * English. Entries without the field are Movies.
  */
 class MYLProvider : MainAPI() {
     override var mainUrl = "http://192.168.5.177:8765"
@@ -63,7 +68,10 @@ class MYLProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Movie)
 
     override val mainPage = mainPageOf(
-        "$mainUrl/list" to "My List"
+        "$mainUrl/cat/movie" to "Movies",
+        "$mainUrl/cat/dubbed" to "Dubbed",
+        "$mainUrl/cat/series" to "Web Series",
+        "$mainUrl/cat/english" to "English"
     )
 
     private val addUrl = "$mainUrl/__add__"
@@ -72,8 +80,19 @@ class MYLProvider : MainAPI() {
     private data class Entry(
         val url: String,
         val storedTitle: String?,
-        val poster: String? = null
+        val poster: String? = null,
+        val category: String = "movie"
     )
+
+    companion object {
+        private val CATEGORIES =
+            setOf("movie", "dubbed", "series", "english")
+
+        fun cleanCategory(raw: String?): String {
+            val c = raw?.trim()?.lowercase().orEmpty()
+            return if (c in CATEGORIES) c else "movie"
+        }
+    }
 
     // ------------------------------------------------------------------
     // The Pi list
@@ -92,7 +111,8 @@ class MYLProvider : MainAPI() {
                         parts.getOrNull(1)?.trim()
                             ?.takeIf { it.isNotBlank() },
                         parts.getOrNull(2)?.trim()
-                            ?.takeIf { it.isNotBlank() }
+                            ?.takeIf { it.isNotBlank() },
+                        cleanCategory(parts.getOrNull(3))
                     )
                 }
                 .filter { it.url.startsWith("http") }
@@ -237,32 +257,41 @@ class MYLProvider : MainAPI() {
         if (page > 1) {
             return newHomePageResponse(request, emptyList(), false)
         }
+        val category = cleanCategory(request.data.substringAfterLast('/'))
         val cards = mutableListOf<SearchResponse>()
-        cards.add(cardOf("➕ Add a link", addUrl))
         val entries = fetchEntries()
         if (entries == null) {
-            cards.add(
-                cardOf("⚠ Pi not reachable — open on home Wi-Fi", infoUrl)
-            )
-        } else {
-            val titled = coroutineScope {
-                entries.map { e ->
-                    async { Triple(titleFor(e), e.url, e.poster) }
-                }.awaitAll()
-            }
-            val posters = coroutineScope {
-                titled.map { (title, _, stored) ->
-                    async { stored ?: posterFor(title, yearOf(title)) }
-                }.awaitAll()
-            }
-            for ((index, triple) in titled.withIndex()) {
+            if (category == "movie") {
                 cards.add(
                     cardOf(
-                        triple.first, triple.second,
-                        posters.getOrNull(index)
+                        "⚠ Pi not reachable — open on home Wi-Fi",
+                        infoUrl
                     )
                 )
             }
+            return newHomePageResponse(request, cards, hasNext = false)
+        }
+        if (category == "movie") {
+            cards.add(cardOf("➕ Add a link", addUrl))
+        }
+        val inCategory = entries.filter { it.category == category }
+        val titled = coroutineScope {
+            inCategory.map { e ->
+                async { Triple(titleFor(e), e.url, e.poster) }
+            }.awaitAll()
+        }
+        val posters = coroutineScope {
+            titled.map { (title, _, stored) ->
+                async { stored ?: posterFor(title, yearOf(title)) }
+            }.awaitAll()
+        }
+        for ((index, triple) in titled.withIndex()) {
+            cards.add(
+                cardOf(
+                    triple.first, triple.second,
+                    posters.getOrNull(index)
+                )
+            )
         }
         return newHomePageResponse(request, cards, hasNext = false)
     }
