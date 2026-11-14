@@ -78,10 +78,10 @@
     "name": "KM"
   },
   {
-    "fileHash": "sha256-63120927b8a7dd20a3d733a156b04c772c1791a64c5a6e2ae24d396cd3e1ce69",
+    "fileHash": "sha256-18a2fcbf16e96117e630d422b4511d4df6941749d75b442a52e0159292fcae1c",
     "apiVersion": 1,
     "repositoryUrl": "https://github.com/karthibeit/CSR",
-    "fileSize": 63126,
+    "fileSize": 63393,
     "status": 3,
     "language": "en",
     "authors": [
@@ -90,7 +90,7 @@
     "tvTypes": [
       "Movie"
     ],
-    "version": 5,
+    "version": 6,
     "internalName": "MYL",
     "description": "MyList — your own pasted links (HubCloud, HubDrive, Pixeldrain, direct files), served from your Raspberry Pi on the home network",
     "url": "https://github.com/karthibeit/CSR/raw/main/cs/MYL.cs3",
