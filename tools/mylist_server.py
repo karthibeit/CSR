@@ -444,7 +444,7 @@ MANIFEST = json.dumps({
 })
 
 SW = (
-    "const C='mylist-v6';"
+    "const C='mylist-v7';"
     "self.addEventListener('install',e=>{e.waitUntil("
     "caches.open(C).then(c=>c.addAll(['/',"
     "'/manifest.webmanifest','/icon-192.png','/icon-512.png']))"
@@ -524,6 +524,14 @@ padding:.5em .6em;font-size:.9rem}
 .rm{background:transparent;border:1px solid #54302e;color:#ff8f8f;
 border-radius:10px;padding:.5em .95em;font-size:.9rem;font-weight:600}
 .rm:active{background:#38211f}
+.ctrl2{display:flex;gap:8px;margin-top:8px}
+.cbtn{flex:1;background:var(--card2);border:1px solid var(--line);
+color:var(--txt);border-radius:10px;padding:.5em .6em;
+font-size:.9rem;font-weight:600}
+.cbtn:active{background:#262b34}
+.cbtn:disabled{opacity:.55}
+.vstat{font-size:.85rem;margin-top:8px;min-height:1em;
+word-break:break-word}
 .empty{color:var(--mut);text-align:center;padding:28px 12px;
 border:1px dashed var(--line);border-radius:16px;margin-top:14px}
 .pinsec{margin-top:26px;background:var(--card);
@@ -617,7 +625,19 @@ function card(it, i){
   b.className="rm"; b.textContent="Remove";
   b.onclick=function(){ del(i); };
   ctrl.appendChild(b);
+  var ctrl2=document.createElement("div"); ctrl2.className="ctrl2";
+  var cb=document.createElement("button");
+  cb.className="cbtn"; cb.textContent="Copy link";
+  cb.onclick=function(){ copyLink(it.url, cb); };
+  ctrl2.appendChild(cb);
+  var vb=document.createElement("button");
+  vb.className="cbtn"; vb.textContent="Re-verify";
+  ctrl2.appendChild(vb);
+  var vs=document.createElement("div"); vs.className="vstat";
+  vb.onclick=function(){ recheck(i, vb, vs); };
   main.appendChild(ctrl);
+  main.appendChild(ctrl2);
+  main.appendChild(vs);
   d.appendChild(main);
   return d;
 }
@@ -651,6 +671,47 @@ function render(items){
 function refresh(){
   fetch("/list.json").then(function(r){return r.json()})
     .then(render).catch(function(){});
+}
+function copyLink(url, btn){
+  function done(){
+    var old=btn.textContent; btn.textContent="Copied \u2713";
+    setTimeout(function(){ btn.textContent=old; }, 1500);
+  }
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(url).then(done).catch(function(){
+      legacyCopy(url); done();
+    });
+  } else { legacyCopy(url); done(); }
+}
+function legacyCopy(url){
+  var ta=document.createElement("textarea");
+  ta.value=url; ta.style.position="fixed"; ta.style.opacity="0";
+  document.body.appendChild(ta); ta.select();
+  try{ document.execCommand("copy"); }catch(e){}
+  document.body.removeChild(ta);
+}
+function recheck(i, btn, out){
+  btn.disabled=true; var old=btn.textContent;
+  btn.textContent="Checking..."; out.textContent=""; out.className="vstat";
+  fetch("/recheck",{method:"POST",
+    headers:{"Content-Type":"application/x-www-form-urlencoded"},
+    body:"index="+i})
+  .then(function(r){return r.json()})
+  .then(function(res){
+    btn.disabled=false; btn.textContent=old;
+    if(res.alive){
+      out.textContent="\u2713 Alive - "+(res.detail||"link is working");
+      out.className="vstat ok";
+    } else {
+      out.textContent="\u2717 Dead - "+
+        (res.detail||res.error||"link did not answer");
+      out.className="vstat bad";
+    }
+  }).catch(function(){
+    btn.disabled=false; btn.textContent=old;
+    out.textContent="Could not reach the Pi server";
+    out.className="vstat bad";
+  });
 }
 function del(i){
   fetch("/delete",{method:"POST",
@@ -999,6 +1060,24 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 pass
             self._json({"ok": True})
+            return
+        if path == "/recheck":
+            try:
+                idx = int((form.get("index") or ["-1"])[0])
+            except ValueError:
+                idx = -1
+            if not (0 <= idx < len(links)):
+                self._json({"ok": False,
+                            "error": "no such entry"}, 400)
+                return
+            url = split_entry(links[idx])[0]
+            title, error = verify(url)
+            if error:
+                self._json({"ok": True, "alive": False,
+                            "detail": error})
+            else:
+                self._json({"ok": True, "alive": True,
+                            "detail": title or "Link is working"})
             return
         self._json({"ok": False, "error": "unknown path"}, 404)
 
